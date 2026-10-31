@@ -64,7 +64,7 @@ thì tạo `DeltaSkin.plist`:
 | ô nhập | skin id: nhập số thập phân (`12345`) hoặc hex (`0x3039`) |
 | **APPLY SKIN** | gọi setter skin cho mọi object súng tìm thấy |
 | **RESTORE** | áp skin id `0` (về mặc định) |
-| dòng trạng thái | `ready · GNames … · GObjects …` = tìm thấy engine; `no target matched (code -4)` = tên setter không khớp bản build này |
+| dòng trạng thái | `ready · GNames … · GObjects …` = tìm thấy engine; `ace N/7` = số hàm gửi report của ACE đã bị vô hiệu; `no target matched (code -4)` = tên setter không khớp bản build này |
 
 Mã lỗi trong trạng thái:
 - `-1/-2` object/class không hợp lệ

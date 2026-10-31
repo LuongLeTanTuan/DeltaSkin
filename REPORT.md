@@ -167,6 +167,77 @@ tất cả các loại mod.
 
 ---
 
+### 4.1 Ai thực sự ban? (phân tích `anogs.framework` = Tencent ACE)
+
+Đã chạy IDA 9.1 headless trên `anogs` (2.9 MB), dump 29 entry `AnoSDK*`, 374 import và
+decompile các hàm quanh chuỗi `ban/cheat/report/risk`.
+
+Kết luận có bằng chứng: **không có hàm ban nào trên máy.** Kiến trúc thật là:
+
+```
+detector trong anogs  ->  gom bằng chứng vào blob
+      -> game gọi AnoSDKGetReportData*()  (import trong binary DeltaForceClient,
+         thấy rõ chuỗi "AnoSDKGetReportData" tại 0x17e7c31a / 0x182fb1a4)
+      -> game tự upload
+      -> server ACE quyết định ban
+```
+
+Decompile 3 getter (rút gọn):
+
+```c
+AnoSDKGetReportData3()          -> ioctl cmd 37 (0x25) rồi trả con trỏ blob
+AnoSDKGetReportData4(int tipo)  -> ioctl cmd 59 (0x3B) rồi trả con trỏ blob
+AnoSDKGetReportData / 2         -> BR X9 (nhảy qua bảng dispatch nội bộ)
+```
+
+Bốn getter này **không có caller nào bên trong anogs** (xref rỗng) — nghĩa là chỉ host app gọi.
+Đó chính là "hàm chịu trách nhiệm ban" ở phía client, và là điểm chặn sạch nhất.
+
+Ba bộ thu thập đáng chú ý:
+
+| Hàm | Việc |
+|---|---|
+| `sub_4B240` (`cheat_open_id`) | ghi openid của tài khoản vào report, chống đổi acc sau ban |
+| `sub_F8B50` (`shell_report`) | report fingerprint thiết bị, bật/tắt theo config, lấy mẫu `rand()%1000==722` (~0.1%) |
+| `sub_82230` (`DoRiskFileTCJTask`) | quét file rủi ro theo path |
+
+Và đường doạ người chơi trên máy jailbreak:
+`sub_B5420` dựng hộp thoại *"Your device has been jailbroken... EXIT"*, được gọi từ `sub_B53C0`.
+Trên iOS 14.8.1 đây là thứ chặn game, không phải ban.
+
+### 4.2 Hook đã cài trong bản clone
+
+`DeltaSkin.mm` mục `ACE (anogs) neutralise`:
+
+```c
+ds_install_ace()      // 7 hàm: AnoSDKGetReportData{,,2,3,4} + AnoSDKDelReportData{,3,4}
+ds_kill_jb_warning()  // chỉ chạy khi thấy dấu hiệu jailbreak
+```
+
+- Ghi đè **prologue 8 byte** thành `mov w0,#0 ; ret` (`0x52800000`, `0xD65F03C0`).
+  Không trampoline, không PAC, chạy giống nhau trên arm64 và arm64e.
+- `vm_protect(..., VM_PROT_READ|WRITE|COPY)` để lấy bản COW, ghi, `sys_icache_invalidate`,
+  rồi trả page về `R|X`. Không để page nào vừa W vừa X.
+- Hàm JB được tìm **theo chuỗi** (XOR 0x2B) chứ không theo offset: quét `__TEXT` của `anogs`,
+  tìm cặp `ADRP+ADD` trỏ tới chuỗi, lùi về `stp x29,x30` gần nhất trong 0x200 byte.
+  Không khớp -> không patch (fail closed, không crash).
+- Gọi trong `ds_start()` trước khi UI lên; trạng thái hiện `ace N/7` trong panel.
+
+Vì sao patch prologue chứ không redirect GOT của app: trên arm64e (A12+) các slot
+`__auth_got` được ký PAC theo địa chỉ, ghi đè thô sẽ crash; patch code không dính PAC.
+
+### 4.3 Giới hạn phải biết
+
+1. Bản clone **không thể** chặn ban nếu server đã có dữ liệu từ trước, hoặc nếu ban dựa trên
+   hash binary / dylib lạ trong bundle. Nó chỉ cắt đường *gửi bằng chứng mới*.
+2. Nếu ACE re-checksum đúng page chứa getter, có thể lộ. Ta chỉ sửa 8 byte/hàm và giữ page ở RX.
+3. Trên iOS 18 không jailbreak, page `__TEXT` sửa bằng COW vẫn có thể bị `cs_invalid_page`
+   nếu bị page-out rồi page-in lại. Chưa quan sát được (không có máy).
+4. Code patch JB-dialog chỉ chạy khi `ds_jb_hint()` thấy `/var/jb`, `Cydia.app` hoặc `sshd`
+   — trên iOS 18 sạch sẽ không đụng vào.
+
+---
+
 ## 5. Sản phẩm: `D:\dfgpt\DeltaSkinMod`
 
 Cấu trúc:
