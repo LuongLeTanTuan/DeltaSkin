@@ -62,15 +62,20 @@ thì tạo `DeltaSkin.plist`:
 | Nút | Việc |
 |---|---|
 | **DS** (nút tròn) | mở/đóng panel |
-| ô nhập | skin id: nhập số thập phân (`12345`) hoặc hex (`0x3039`) |
+| **WEAPON / SKIN** | hai tab chọn: tab `WEAPON` là danh sách 85 khẩu súng, tab `SKIN` là danh sách skin của khẩu đang chọn |
+| bánh xe (picker) | cuộn chọn. Chọn súng xong menu tự nhảy sang tab `SKIN` và chọn sẵn skin đầu tiên (giống menu gốc) |
+| ô nhập | skin id dạng thập phân (`12345`) hoặc hex (`0x858772DF`); picker tự điền vào đây, sửa tay vẫn được |
 | **APPLY SKIN** | gọi setter skin cho mọi object súng tìm thấy |
 | **RESTORE** | áp skin id `0` (về mặc định) |
-| dòng trạng thái | `ready · GNames … · GObjects …` = tìm thấy engine; `ace N/7` = số hàm gửi report của ACE đã bị vô hiệu; `no target matched (code -4)` = tên setter không khớp bản build này |
+| dòng trạng thái | `ready · N weapons · ace N/7` = bảng skin đã nạp + số hàm gửi report của ACE đã bị vô hiệu; `no target matched (code -4)` = tên setter không khớp bản build này |
+
+Danh sách súng và skin **lấy nguyên từ `PxMenu.dylib`** (bảng 705 dòng tại `0x1C680`, 85 tên súng tại
+`0x1C2C8`) nên trùng khớp menu gốc của bên bán, kể cả tên tiếng Việt.
 
 Mã lỗi trong trạng thái:
 - `-1/-2` object/class không hợp lệ
 - `-4` không tìm thấy UFunction setter nào (game đổi tên hoặc đổi lớp)
-- `GNames not found` / `GObjects not found` = layout engine đổi → cần cập nhật magic/scan trong `DeltaSkin.mm`
+- `pool not found` / `objects not found` = layout engine đổi → cần cập nhật magic/scan trong `DeltaSkin.mm`
 
 Log chi tiết: Console.app hoặc `idevicesyslog | grep DeltaSkin`.
 
@@ -80,7 +85,8 @@ Log chi tiết: Console.app hoặc `idevicesyslog | grep DeltaSkin`.
 
 - Chỉ đổi skin **phía client** (người khác không thấy, server không nhận). Đây là mức can thiệp thấp nhất.
 - Dylib tự ngủ nếu phát hiện Frida hoặc debugger đang bám.
-- Không sửa file game, không hook `anogs` (ACE), không tạo file lạ trên máy.
+- Không sửa file game, không tạo file lạ trên máy. `anogs` (ACE) **chỉ bị vô hiệu hoá 7 hàm gửi report**
+  (`AnoSDKGetReportData*` / `AnoSDKDelReportData*`) — chi tiết ở `REPORT.md` mục 4.
 - **Không có bảo đảm miễn ban.** App bị ký lại + dylib lạ trong bundle vẫn là tín hiệu; dùng acc phụ để thử trước.
 
 ---

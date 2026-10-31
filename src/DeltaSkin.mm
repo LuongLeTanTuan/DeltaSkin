@@ -586,6 +586,9 @@ static void ds_bootstrap(void) {
 @property (nonatomic, strong) UILabel *status;
 @property (nonatomic, strong) UISegmentedControl *mode;
 @property (nonatomic, strong) UIPickerView *picker;
+@property (nonatomic, strong) UIButton *fab;
+@property (nonatomic, strong) UIButton *applyBtn;
+@property (nonatomic, strong) UIButton *restoreBtn;
 @property (nonatomic, assign) NSInteger weaponIdx;
 @property (nonatomic, assign) NSInteger skinIdx;
 @property (nonatomic, assign) BOOL open;
@@ -622,10 +625,10 @@ static void ds_bootstrap(void) {
     self.root = [[UIView alloc] initWithFrame:host.bounds];
     self.root.backgroundColor = UIColor.clearColor;
     self.root.userInteractionEnabled = YES;
+    self.root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [host addSubview:self.root];
 
     UIButton *fab = [UIButton buttonWithType:UIButtonTypeCustom];
-    fab.frame = CGRectMake(18, 56, 54, 54);
     fab.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.13 alpha:0.92];
     fab.layer.cornerRadius = 27;
     fab.layer.borderWidth = 1;
@@ -633,10 +636,33 @@ static void ds_bootstrap(void) {
     [fab setTitle:@"DS" forState:UIControlStateNormal];
     [fab setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     [fab addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
+    self.fab = fab;
     [self.root addSubview:fab];
 
     [self buildPanel];
     [self.root addSubview:self.panel];
+    [self relayout];
+}
+
+// The game runs landscape, so panel height is driven by the screen, not by a
+// fixed constant: the picker absorbs the difference and nothing gets clipped.
+- (void)relayout {
+    CGRect b = self.root.bounds;
+    CGFloat w = MIN(300.0, b.size.width - 36.0);
+    CGFloat h = MIN(400.0, b.size.height - 16.0);
+    CGFloat y = (b.size.height - h) / 2.0;
+    if (y < 8) y = 8;
+
+    self.panel.frame = CGRectMake(18, y, w, h);
+
+    CGFloat ph = MAX(96.0, h - 250.0);
+    self.mode.frame = CGRectMake(16, 58, w - 32, 32);
+    self.picker.frame = CGRectMake(8, 94, w - 16, ph);
+    self.field.frame = CGRectMake(16, 94 + ph + 8, w - 32, 38);
+    self.applyBtn.frame = CGRectMake(16, 94 + ph + 54, w - 32, 44);
+    self.restoreBtn.frame = CGRectMake(16, 94 + ph + 104, w - 32, 38);
+
+    self.fab.frame = CGRectMake(b.size.width - 72, b.size.height - 76, 54, 54);
 }
 
 - (UILabel *)label:(NSString *)text size:(CGFloat)size color:(UIColor *)color {
@@ -649,8 +675,7 @@ static void ds_bootstrap(void) {
 
 - (void)buildPanel {
     CGFloat w = 300;
-    CGFloat h = 402;
-    self.panel = [[UIView alloc] initWithFrame:CGRectMake(18, 118, w, h)];
+    self.panel = [[UIView alloc] initWithFrame:CGRectZero];
     self.panel.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.11 alpha:0.97];
     self.panel.layer.cornerRadius = 16;
     self.panel.layer.borderWidth = 1;
@@ -703,6 +728,7 @@ static void ds_bootstrap(void) {
     [apply setTitle:@"APPLY SKIN" forState:UIControlStateNormal];
     [apply setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
     [apply addTarget:self action:@selector(applyTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.applyBtn = apply;
     [self.panel addSubview:apply];
 
     UIButton *restore = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -712,6 +738,7 @@ static void ds_bootstrap(void) {
     [restore setTitle:@"RESTORE (skin 0)" forState:UIControlStateNormal];
     [restore setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     [restore addTarget:self action:@selector(restoreTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.restoreBtn = restore;
     [self.panel addSubview:restore];
 
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -788,6 +815,7 @@ static void ds_bootstrap(void) {
     self.panel.hidden = !self.open;
     if (self.open) {
         self.status.text = gStatus;
+        [self relayout];
         [self reloadPickers];
         [self runReport];
     }

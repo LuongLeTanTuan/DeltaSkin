@@ -135,6 +135,35 @@ với `int` đầu tiên = skin id.
 
 ---
 
+### 3.8 Bảng súng/skin của menu gốc (đã trích ra)
+
+Toàn bộ danh sách trong menu gốc là dữ liệu tĩnh trong `__DATA_CONST`, không phải gọi game:
+
+| Địa chỉ (file = vmaddr) | Nội dung |
+|---|---|
+| `0x1C2C8` | mảng 85 con trỏ → tên súng (`M4A1 Assault Rifle`, `AKM Assault Rifle`, …) |
+| `0x1C680` | 705 dòng, stride 16: `{ int32 weaponId; int32 skinId; char* skinName; }` |
+
+Đọc bằng cách map vmaddr → file offset (trong dylib này `__TEXT` bắt đầu ở 0 nên vmaddr = offset),
+resolve con trỏ tên, decode UTF-8. Kết quả: **85 súng / 705 skin, 0 dòng hỏng**, tên tiếng Việt đúng
+dấu (bảng gốc lưu UTF-8).
+
+Ba hàm dùng bảng này:
+
+- `sub_77A8(store, weaponId)` — đếm số dòng cùng `weaponId` rồi dựng mảng tên skin; hết tên thì
+  fallback `Skin #%u`, danh sách rỗng thì `Default / None`.
+- `sub_7948` — chọn súng: lưu `skin_weapon_idx`, nạp lại options của dropdown skin, chọn index 0,
+  và đặt `skin_gun_id` = skinId của dòng đầu tiên khớp (`"0x%08X"`).
+- `sub_7AD0` — chọn skin thứ N: đặt `skin_gun_id` theo dòng khớp thứ N.
+- `sub_7BA4` — đọc `skin_gun_id`, `strtoul(...,0,0)`, gọi `-[PxUE4 applySkin:]`, map mã trả về ra
+  câu thông báo "applied via …".
+
+Bản clone nhúng nguyên bảng này vào `src/SkinTable.h` dưới dạng blob XOR `0x5A` (85 tên súng +
+705 dòng), decode lúc chạy bằng đúng hàm `noinline` đã dùng cho các chuỗi khác — nên không có tên
+súng/skin nào nằm plaintext trong binary.
+
+---
+
 ## 4. Né anti-cheat: cái gì thật, cái gì không
 
 Đã kiểm tra (evidence):
@@ -152,7 +181,8 @@ client-side. Rủi ro ban đến từ (a) việc app bị chỉnh sửa/ ký l�
 
 Vì vậy "nâng cấp antiban" trong bản clone = **giảm bề mặt bị phát hiện**, không phải thêm trick:
 
-1. Không swizzle, không inline hook, không patch ACE/anogs — bản clone chỉ đọc bộ nhớ và gọi hàm có sẵn.
+1. Không swizzle, không inline hook, không patch logic game. Chỗ duy nhất bị sửa code là 7 hàm
+   *gửi report* của ACE (`AnoSDKGetReportData*` / `AnoSDKDelReportData*`) — xem 4.1/4.2.
 2. Từ chối khởi động nếu thấy Frida (`dlopen /usr/lib/frida/frida-agent.dylib`, env `FRIDA_AGENT_PATH`)
    hoặc đang bị trace (`sysctl.proc_traced`) → ngủ im.
 3. Không tạo file trong `/var/mobile`, không dùng suite riêng dễ nhận diện; cấu hình chỉ trong NSUserDefaults của app.
