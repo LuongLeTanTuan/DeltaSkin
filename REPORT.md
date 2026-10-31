@@ -216,7 +216,21 @@ Khác biệt có chủ ý:
 
 ---
 
-## 7. Bước tiếp theo nếu có thiết bị
+## 7. Build & phát hành
+
+- Repo: https://github.com/LuongLeTanTuan/DeltaSkin (public).
+- Máy này không có Xcode; **macOS runner của GitHub Actions bị account này từ chối** (run bị cancel ngay,
+  0 bước). Đã xác minh: runner `ubuntu-latest` chạy bình thường.
+- Vì vậy workflow build bằng Linux: cài `clang + lld`, tải iPhoneOS SDK từ `theos/sdks`, biên dịch
+  `-target arm64-apple-ios14.0`, link bằng `ld64.lld` với `-undefined dynamic_lookup`.
+- Lỗi lần đầu đã gặp và đã sửa (ghi lại để khỏi mất công): `mach_vm.h` không tồn tại trên SDK di động →
+  dùng `vm_region_recurse_64`; `_dyld_get_image_header` trả `mach_header*` → phải ép kiểu; file nguồn
+  phải thuần ASCII (ký tự `—` làm clang báo `unexpected character U+FFFD`).
+- Tải bản build: tab **Actions** → run mới nhất → artifact `DeltaSkin-dylib`.
+
+---
+
+## 8. Bước tiếp theo nếu có thiết bị
 
 1. Build dylib (Actions), chèn vào IPA bằng eSign, cài.
 2. Mở game, bấm nút "DS" → xem dòng trạng thái. Nếu `GNames not found` / `GObjects not found` thì bản build
