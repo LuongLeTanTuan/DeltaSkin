@@ -9,7 +9,10 @@ không hook vào anti-cheat.
 
 ## 1. Build
 
-**Cách A — GitHub Actions (khuyên dùng, không cần Mac):**
+**Cách A — tải bản build sẵn (không cần Mac):**
+Repo: https://github.com/LuongLeTanTuan/DeltaSkin → tab **Actions** → run `build` mới nhất → tải artifact
+`DeltaSkin-dylib` (giải nén ra `DeltaSkin.dylib`).
+
 1. Push repo lên GitHub (workflow đã có sẵn trong `.github/workflows/build.yml`).
 2. Tab **Actions** → workflow `build` → tải artifact `DeltaSkin-dylib`.
    Hoặc tạo tag `v1.0` để nó tự đính file vào Release: `git tag v1.0 && git push --tags`.
