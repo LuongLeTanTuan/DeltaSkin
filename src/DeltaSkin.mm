@@ -16,6 +16,8 @@
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <sys/sysctl.h>
+#import <libkern/OSCacheControl.h>
+#import <unistd.h>
 #import <dlfcn.h>
 #import <string.h>
 #import <stdlib.h>
@@ -59,6 +61,7 @@ DSSTR(kHostImage, 0x13,
 static uint64_t gGenObjects = 0;   // async, set on main thread
 static BOOL     gReady = NO;
 static NSString *gStatus = @"idle";
+static int      gAceHits = 0;
 
 typedef struct {
     uint64_t lo;
@@ -606,8 +609,8 @@ static void ds_bootstrap(void) {
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         if (!gReady) ds_bootstrap();
         NSString *s = gReady
-            ? [NSString stringWithFormat:@"ready - GNames 0x%llx - GObjects 0x%llx",
-                                         (unsigned long long)0, (unsigned long long)gGenObjects]
+            ? [NSString stringWithFormat:@"ready - GNames 0x%llx - GObjects 0x%llx - ace %d/7",
+                                         (unsigned long long)0, (unsigned long long)gGenObjects, gAceHits]
             : gStatus;
         [self setStatusText:s];
     });
@@ -654,10 +657,161 @@ static BOOL ds_hostile_environment(void) {
     return traced != 0;
 }
 
+// ---------------------------------------------------- ACE (anogs) neutralise
+// Nothing on the device bans anybody. anogs (Tencent ACE) collects evidence,
+// the host app pulls that blob with AnoSDKGetReportData*() and uploads it, and
+// ACE's server applies the ban. Those getters have no caller inside anogs, so
+// rewriting their prologue erases the evidence without disturbing a detector
+// (ACE re-checksums its own code, so we touch as few bytes as possible).
+//
+// mov w0,#0 ; ret - zero-extending, so it satisfies any int/pointer return.
+// No pointer authentication involved, unlike redirecting the host's GOT slots.
+
+static BOOL ds_prot_set(void *addr, size_t len, vm_prot_t prot) {
+    uintptr_t a = (uintptr_t)addr;
+    uintptr_t page = a & ~(uintptr_t)(vm_page_size - 1);
+    uintptr_t end = (a + len + vm_page_size - 1) & ~(uintptr_t)(vm_page_size - 1);
+    return vm_protect(mach_task_self(), (vm_address_t)page, (vm_size_t)(end - page),
+                      FALSE, prot) == KERN_SUCCESS;
+}
+
+static BOOL ds_patch_ret0(void *fn) {
+    if (!fn) return NO;
+    uint32_t code[2] = { 0x52800000u, 0xD65F03C0u };
+    if (!ds_prot_set(fn, sizeof(code), VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY)) return NO;
+    memcpy(fn, code, sizeof(code));
+    sys_icache_invalidate(fn, sizeof(code));
+    ds_prot_set(fn, sizeof(code), VM_PROT_READ | VM_PROT_EXECUTE);
+    return YES;
+}
+
+static void *ds_ace_sym(const char *name) {
+    void *p = dlsym(RTLD_DEFAULT, name);
+    if (p) return p;
+    static void *ano = NULL;
+    if (!ano) {
+        NSString *path = [[[NSBundle mainBundle] privateFrameworksPath]
+                          stringByAppendingPathComponent:@"anogs.framework/anogs"];
+        ano = dlopen(path.UTF8String, RTLD_LAZY | RTLD_NOLOAD);
+        if (!ano) ano = dlopen(path.UTF8String, RTLD_LAZY);
+    }
+    return ano ? dlsym(ano, name) : NULL;
+}
+
+// The four report getters + the three "drop it" calls. Killing both halves
+// means the host never receives a report and never acknowledges one.
+static int ds_install_ace(void) {
+    static const char *const names[] = {
+        "AnoSDKGetReportData",  "AnoSDKGetReportData2",
+        "AnoSDKGetReportData3", "AnoSDKGetReportData4",
+        "AnoSDKDelReportData",  "AnoSDKDelReportData3", "AnoSDKDelReportData4",
+    };
+    const size_t n = sizeof(names) / sizeof(names[0]);
+    int ok = 0;
+    for (size_t i = 0; i < n; i++) {
+        void *p = ds_ace_sym(names[i]);
+        if (p && ds_patch_ret0(p)) ok++;
+    }
+    NSLog(@"[DeltaSkin] ACE report channel: %d/%zu neutralised", ok, n);
+    return ok;
+}
+
+// Jailbroken devices only: ACE builds a "your device has been jailbroken /
+// EXIT" dialog and drops the game. Locate that leaf function by the message it
+// loads, walk back to its frame setup, and return early. Bounded; when the
+// anchor is not where we expect, nothing is patched.
+static BOOL ds_jb_hint(void) {
+    return access("/var/jb/usr/bin/dpkg", F_OK) == 0
+        || access("/Applications/Cydia.app", F_OK) == 0
+        || access("/usr/sbin/sshd", F_OK) == 0;
+}
+
+static BOOL ds_kill_jb_warning(void) {
+    static const unsigned char enc[] = {
+        0x43, 0x4A, 0x58, 0x0B, 0x49, 0x4E, 0x4E, 0x45, 0x0B, 0x41, 0x4A, 0x42,
+        0x47, 0x49, 0x59, 0x44, 0x40, 0x4E, 0x45, 0x07, 0x0B, 0x5C, 0x43, 0x42,
+        0x48, 0x43, 0x0B, 0x5B, 0x44, 0x58, 0x4E, 0x58, 0x0B, 0x4A, 0x0B, 0x58,
+        0x4E, 0x48, 0x5E, 0x59, 0x42, 0x5F, 0x52, 0x0B, 0x59, 0x42, 0x58, 0x40,
+    };
+    char needle[sizeof(enc) + 1];
+    for (size_t i = 0; i < sizeof(enc); i++) needle[i] = (char)(enc[i] ^ 0x2B);
+    needle[sizeof(enc)] = 0;
+
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (!nm) continue;
+        const char *b = strrchr(nm, '/');
+        b = b ? b + 1 : nm;
+        if (strcmp(b, "anogs") != 0) continue;
+
+        const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
+        if (!mh || mh->magic != MH_MAGIC_64) return NO;
+        int64_t slide = _dyld_get_image_vmaddr_slide(i);
+
+        uint64_t textLo = 0, textHi = 0;
+        uint64_t p = (uint64_t)mh + sizeof(struct mach_header_64);
+        for (uint32_t c = 0; c < mh->ncmds; c++) {
+            const struct load_command *lc = (const struct load_command *)p;
+            if (lc->cmd == LC_SEGMENT_64) {
+                const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                if (strcmp(seg->segname, "__TEXT") == 0) {
+                    textLo = seg->vmaddr + slide;
+                    textHi = textLo + seg->vmsize;
+                }
+            }
+            if (lc->cmdsize < 8) break;
+            p += lc->cmdsize;
+        }
+        if (!textLo || textHi - textLo < 0x1000) return NO;
+
+        uint64_t strAddr = 0;
+        for (uint64_t a = textLo; a + sizeof(needle) < textHi; a++) {
+            if (memcmp((const void *)a, needle, sizeof(needle) - 1) == 0) { strAddr = a; break; }
+        }
+        if (!strAddr) return NO;
+
+        uint64_t site = 0;
+        for (uint64_t a = (textLo + 3) & ~3ull; a + 8 <= textHi; a += 4) {
+            uint32_t i0 = *(uint32_t *)a, i1 = *(uint32_t *)(a + 4);
+            if ((i0 & 0x9F000000u) != 0x90000000u) continue;   // ADRP
+            if ((i1 & 0xFF800000u) != 0x91000000u) continue;   // ADD (imm, no shift)
+            int64_t imm = ((int64_t)((i0 >> 5) & 0x7FFFF) << 2) | ((i0 >> 29) & 3);
+            if (imm & (1 << 20)) imm -= (1 << 21);
+            uint64_t page = (a & ~0xFFFull) + ((uint64_t)imm << 12);
+            if (page + ((i1 >> 10) & 0xFFF) == strAddr) { site = a; break; }
+        }
+        if (!site) return NO;
+
+        uint64_t start = 0;
+        for (int64_t a = (int64_t)site - 4; a >= (int64_t)textLo && a >= (int64_t)site - 0x400; a -= 4) {
+            if (*(uint32_t *)a == 0xD65F03C0u) { start = (uint64_t)a + 4; break; }
+        }
+        if (!start || start >= site || site - start > 0x200) return NO;
+
+        uint32_t first = *(uint32_t *)start;
+        if (first == 0xD503233Fu) first = *(uint32_t *)(start + 4);   // pacibsp
+        BOOL framed = ((first & 0xFFC07FFFu) == 0xA9807BFDu)          // stp x29,x30,[sp,#-n]!
+                   || ((first & 0xFF8003FFu) == 0xD10003FFu);         // sub sp,sp,#n
+        if (!framed) return NO;
+
+        return ds_patch_ret0((void *)start);
+    }
+    return NO;
+}
+
 static void ds_start(void) {
     if (ds_hostile_environment()) {
         NSLog(@"[DeltaSkin] hostile environment, staying dormant");
         return;
+    }
+    @try {
+        gAceHits = ds_install_ace();
+        if (ds_jb_hint()) {
+            NSLog(@"[DeltaSkin] jailbreak dialog patched: %d", ds_kill_jb_warning());
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[DeltaSkin] ace stage threw %@", e);
     }
     // jitter: fixed-death timers are a fingerprint
     double delay = 1.4 + ((double)(arc4random_uniform(900)) / 1000.0);

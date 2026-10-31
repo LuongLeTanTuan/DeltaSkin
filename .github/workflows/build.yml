@@ -15,34 +15,27 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang lld unzip curl
+          echo "== lld binaries =="
+          ls /usr/bin | grep -i lld || true
 
       - name: Fetch iPhoneOS SDK
         run: |
           set -euo pipefail
           curl -sSL -o /tmp/sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
           unzip -q /tmp/sdks.zip -d /tmp/sdks
-          ls /tmp/sdks
           echo "SDK=$(ls -d /tmp/sdks/sdks-master/iPhoneOS*.sdk | sort -V | tail -1)" >> $GITHUB_ENV
 
-      - name: Compile
+      - name: Build arm64 dylib
         run: |
           set -euo pipefail
           echo "SDK=$SDK"
           mkdir -p build
+          # clang drives ld64.lld itself; a bare `ld64.lld` name is not
+          # guaranteed to exist across Ubuntu lld packaging.
           clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
-                -fobjc-arc -O2 -I src \
-                -c src/DeltaSkin.mm -o build/DeltaSkin.o
-          ls -l build
-
-      - name: Link
-        run: |
-          set -euo pipefail
-          ld64.lld -arch arm64 -platform_version ios 14.0 14.0 \
-            -dylib -syslibroot "$SDK" \
-            -o build/DeltaSkin.dylib build/DeltaSkin.o \
-            -F"$SDK/System/Library/Frameworks" -L"$SDK/usr/lib" \
-            -framework Foundation -framework UIKit -framework CoreGraphics \
-            -undefined dynamic_lookup
+                -fobjc-arc -O2 -fuse-ld=lld \
+                -framework Foundation -framework UIKit -framework CoreGraphics \
+                -dynamiclib -o build/DeltaSkin.dylib src/DeltaSkin.mm
           file build/DeltaSkin.dylib
           ls -l build/DeltaSkin.dylib
 
