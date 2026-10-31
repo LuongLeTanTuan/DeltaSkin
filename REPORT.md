@@ -297,7 +297,7 @@ Thiết kế clone (khớp hành vi gốc, bỏ hết phần thừa):
 | `sub_F318` tìm UClass theo tên | `ds_find_class()` |
 | `sub_F47C` tìm UFunction theo tên | `ds_find_function()` (lọc theo Outer = UClass) |
 | `sub_102C8` gọi setter | `ds_apply_skin()` (validate con trỏ trong `__TEXT`, param = int skinId) |
-| menu `PxMenuView` | `DSMenu` (nút nổi "DS" + panel, UITextField nhập ID, Apply/Restore) |
+| menu `PxMenuView` | `DSMenu` — nút nổi "DS" gắn vào window của game, panel trong window riêng, combo `UIAlertController` cho Súng → Skin (xem 5.1) |
 
 Khác biệt có chủ ý:
 - Không có ESP/aimbot/whatever khác.
@@ -305,6 +305,70 @@ Khác biệt có chủ ý:
   Nếu thấy lag hoặc áp nhầm, bật lại bộ lọc 150 unit (đã ghi TODO trong code) sau khi có offset transform.
 - `ds_func_entry()` dò offset con trỏ native trong khoảng 0x80–0x180 thay vì dùng `dword_263C0` học được
   từ binary (offset đó có thể đổi theo bản build).
+
+### 5.1 Chọn skin: clone từ bản no-JB + fix "tắt menu xong không bấm được gì"
+
+Bản đầu của clone dùng `UISegmentedControl` + `UIPickerView`. Nó sai ở hai chỗ, và cả hai đều là lỗi
+**luồng chọn** chứ không phải lỗi hiển thị:
+
+1. **Picker là danh sách phẳng, menu gốc là hai danh sách lọc nhau.** Tab `SKIN` phải là "skin của khẩu
+   đang chọn", nhưng picker giữ `skinIdx` cũ khi đổi súng, nên `ds_skin_id()` trả về dòng của khẩu
+   *trước* → apply ra skin sai hoặc ra `0` (`no target matched`).
+2. **Picker không có nút xác nhận.** `valueChanged` bắn liên tục trong lúc cuộn, nên mỗi lần lướt qua
+   một dòng là một lần đổi `skinIdx`, không có mốc "chốt".
+
+Cách chọn giờ clone nguyên từ `D:\delta\PxExtNoJB` (`Menu\PxMenuView.m` `comboTapped:`,
+`Menu\PxStore.m` `pxBuildSkinTab`):
+
+| Gốc | Clone |
+|---|---|
+| `PxControlCombo` + `UIButton` 96×44 | `weaponCombo` / `skinCombo` (`UIButton`, `ds_row_button`) |
+| `comboTapped:` → `UIAlertController` ActionSheet, mỗi option một `UIAlertAction` | `presentOptions:title:handler:` — cùng cấu trúc, thêm `popoverPresentationController.sourceView` (thiếu là crash trên iPad) |
+| chọn súng → reset skin về index 0 | `weaponTapped` → `skinIdx = 0`, `field.text = @""`, `refresh` |
+| `PxStore` ghi `skin_weapon_idx` / `skin_select_idx` | giữ trong `DSMenu` (phiên chạy), không ghi file |
+| `PxToast` = `UIAlertController` Alert | `ds_toast()` — cùng cách, ưu tiên window của menu nếu đang mở |
+
+**Lỗi "mở menu rồi tắt thì màn hình ngoài không thao tác được"** — nguyên nhân nằm ở bản clone cũ, không
+phải ở game:
+
+```objc
+// bản cũ
+self.root = [[UIView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+self.root.backgroundColor = UIColor.clearColor;
+self.root.userInteractionEnabled = YES;   // <-- đây
+[host addSubview:self.root];
+...
+- (void)close { self.panel.hidden = YES; }   // <-- và đây
+```
+
+`self.root` phủ **toàn màn hình**, trong suốt, nhưng `userInteractionEnabled = YES`. Hit-testing của
+UIKit không quan tâm view đó có màu gì: nó vẫn là view trên cùng của window game, nên mọi cú chạm đều
+rơi vào `root` và bị nuốt. `panel.hidden = YES` chỉ ẩn panel con — `root` vẫn ở đó, vẫn nhận chạm.
+Đây là cùng một lỗi kinh điển của overlay trong suốt.
+
+Bản mới bỏ hẳn `root`:
+
+- Nút **DS** là một `UIButton` 52×52 thêm thẳng vào window của game — chỉ 52×52 điểm đó nhận chạm.
+- Panel nằm trong `UIWindow` **riêng** (`windowLevel = UIWindowLevelAlert + 60`) chỉ tồn tại lúc menu mở.
+- `hide` làm ba việc, không chỉ `hidden = YES`:
+
+```objc
+[self.panel removeFromSuperview];              // panel được giữ lại, window thì không
+w.rootViewController.view.userInteractionEnabled = NO;
+w.hidden = YES;
+w.windowScene = nil;                            // iOS 13+: tháo khỏi scene, không chỉ ẩn
+UIWindow *target = ds_host_window();            // trả key window về cho game
+if (target) [target makeKeyWindow];
+```
+
+`windowScene = nil` là điểm quan trọng: một `UIWindow` chỉ `hidden = YES` vẫn nằm trong
+`UIApplication.windows`, vẫn có thể giữ key status, và trên iOS 13+ vẫn tham gia scene — đó là nửa còn
+lại của triệu chứng "bấm không ăn". `ds_host_window()` chọn window **thấp nhất còn hiển thị** dưới
+`UIWindowLevelAlert`, nên không bao giờ trả về chính window của menu.
+
+Nút **DS** cũng được phân biệt tap với kéo bằng cờ `dragging` (đặt ở `UIGestureRecognizerStateBegan`,
+tiêu thụ ở `fabTapped`) — bản gốc `PxMenuView` dùng đúng cách này; kiểm tra `pan.state` lúc
+`TouchUpInside` không đáng tin vì pan đã về `Ended` trước khi tap bắn.
 
 ---
 

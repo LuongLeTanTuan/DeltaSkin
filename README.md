@@ -11,9 +11,9 @@ không hook vào anti-cheat.
 
 **Cách A — tải bản build sẵn (không cần Mac):**
 Repo: https://github.com/LuongLeTanTuan/DeltaSkin → tab **Actions** → run `build` mới nhất → tải artifact
-`DeltaSkin-dylib` (giải nén ra `DeltaSkin.dylib`, ~120 KB, arm64).
+`DeltaSkin-dylib` (giải nén ra `DeltaSkin.dylib`, ~119 KB, arm64).
 Run đã verify sạch chuỗi (không còn `AnoSDK`, `SetSkin`, `M4A1`, `Assault Rifle`…):
-https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41232210097
+https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41235279529
 
 1. Push repo lên GitHub (workflow đã có sẵn trong `.github/workflows/build.yml`).
 2. Tab **Actions** → workflow `build` → tải artifact `DeltaSkin-dylib`.
@@ -60,15 +60,24 @@ thì tạo `DeltaSkin.plist`:
 
 ## 3. Dùng menu
 
+Cách chọn giống hệt menu gốc bên bán: **Súng → Skin → Apply**, mỗi bước là một bảng danh sách bật lên
+(action sheet) chứ không phải bánh xe cuộn, nên chọn đúng ngay từ đầu và không bị lệch index.
+
 | Nút | Việc |
 |---|---|
-| **DS** (nút tròn) | mở/đóng panel |
-| **WEAPON / SKIN** | hai tab chọn: tab `WEAPON` là danh sách 85 khẩu súng, tab `SKIN` là danh sách skin của khẩu đang chọn |
-| bánh xe (picker) | cuộn chọn. Chọn súng xong menu tự nhảy sang tab `SKIN` và chọn sẵn skin đầu tiên (giống menu gốc) |
-| ô nhập | skin id dạng thập phân (`12345`) hoặc hex (`0x858772DF`); picker tự điền vào đây, sửa tay vẫn được |
-| **APPLY SKIN** | gọi setter skin cho mọi object súng tìm thấy |
-| **RESTORE** | áp skin id `0` (về mặc định) |
-| dòng trạng thái | `ready · N weapons · ace N/7` = bảng skin đã nạp + số hàm gửi report của ACE đã bị vô hiệu; `no target matched (code -4)` = tên setter không khớp bản build này |
+| **DS** (nút tròn) | mở/đóng panel. Kéo được bằng ngón tay, kéo xong không mở menu (phân biệt tap với pan) |
+| **Weapon ▾** | bật bảng 85 khẩu súng. Chọn xong tự reset về skin đầu tiên của khẩu đó và điền sẵn ID |
+| **Skin ▾** | bật bảng skin của khẩu đang chọn (bảng gốc 705 dòng chia theo 85 khẩu). Nút bị mờ nếu khẩu đó không có skin |
+| ô **Custom ID** | skin id thập phân (`12345`) hoặc hex (`0x858772DF`). Chọn từ danh sách thì ô này tự điền, sửa tay vẫn được. Để trống = dùng skin đang chọn |
+| **Apply Skin** | gọi setter skin cho mọi object súng tìm thấy |
+| **Restore Default (0)** | áp skin id `0` (về mặc định) |
+| **Runtime Status** | hiện `ready · N weapons · ace N/7` = bảng skin đã nạp + số hàm gửi report của ACE đã bị vô hiệu |
+| dòng trạng thái | dưới tiêu đề, cập nhật kết quả từng lần Apply (`Skin 0x… applied to N object(s)` / `no target matched (code -4)`) |
+
+Chạm ra vùng tối bên ngoài panel hoặc nút **✕** để đóng. Đóng xong menu **huỷ luôn window của nó**
+(`windowScene = nil`, `hidden = YES`) và trả key window về cho game — đây là lý do bản trước bị
+"tắt menu xong bấm ra ngoài không ăn": panel cũ nằm trong một view phủ toàn màn hình, view đó vẫn
+nhận chạm dù panel đã ẩn.
 
 Danh sách súng và skin **lấy nguyên từ `PxMenu.dylib`** (bảng 705 dòng tại `0x1C680`, 85 tên súng tại
 `0x1C2C8`) nên trùng khớp menu gốc của bên bán, kể cả tên tiếng Việt.
