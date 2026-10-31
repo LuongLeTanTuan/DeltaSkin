@@ -11,8 +11,9 @@ không hook vào anti-cheat.
 
 **Cách A — tải bản build sẵn (không cần Mac):**
 Repo: https://github.com/LuongLeTanTuan/DeltaSkin → tab **Actions** → run `build` mới nhất → tải artifact
-`DeltaSkin-dylib` (giải nén ra `DeltaSkin.dylib`, ~87 KB, arm64).
-Run đã verify sạch chuỗi: https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41231334845
+`DeltaSkin-dylib` (giải nén ra `DeltaSkin.dylib`, ~120 KB, arm64).
+Run đã verify sạch chuỗi (không còn `AnoSDK`, `SetSkin`, `M4A1`, `Assault Rifle`…):
+https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41232210097
 
 1. Push repo lên GitHub (workflow đã có sẵn trong `.github/workflows/build.yml`).
 2. Tab **Actions** → workflow `build` → tải artifact `DeltaSkin-dylib`.

@@ -331,6 +331,11 @@ Khác biệt có chủ ý:
   dùng `vm_region_recurse_64`; `_dyld_get_image_header` trả `mach_header*` → phải ép kiểu; file nguồn
   phải thuần ASCII (ký tự `—` làm clang báo `unexpected character U+FFFD`).
 - Tải bản build: tab **Actions** → run mới nhất → artifact `DeltaSkin-dylib`.
+  Run đã kiểm tra: https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41232210097
+  (`DeltaSkin.dylib`, 120 456 byte, arm64; quét byte: 0 hit cho `AnoSDK`, `SetSkin`, `ModularWeapon`,
+  `jailbroken`, `DeltaForceClient`, `GNames/GObjects`, `UObject` **và** 0 hit cho tên súng/skin
+  như `M4A1`, `Assault Rifle`, `Submachine`, `Sniper Rifle`).
+- Kích thước tăng từ 87 KB → 120 KB vì có bảng 85 súng / 705 skin nhúng (blob XOR 18,9 KB).
 
 ---
 
