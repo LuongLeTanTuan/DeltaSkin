@@ -157,7 +157,10 @@ Vì vậy "nâng cấp antiban" trong bản clone = **giảm bề mặt bị ph�
    hoặc đang bị trace (`sysctl.proc_traced`) → ngủ im.
 3. Không tạo file trong `/var/mobile`, không dùng suite riêng dễ nhận diện; cấu hình chỉ trong NSUserDefaults của app.
 4. Jitter khởi động 1.4–2.3 s (timer cố định là fingerprint).
-5. Chuỗi tên lớp UE (`ModularWeaponDesc`, `SetSkin…`) được XOR trong binary → quét chuỗi không thấy.
+5. Chuỗi tên lớp UE (`ModularWeaponDesc`, `SetSkin…`) và tên export ACE (`AnoSDKGetReportData…`)
+   được XOR trong binary → quét chuỗi không thấy. Lưu ý đã gặp: ở `-O2` clang **hằng số hoá**
+   vòng XOR và nhét lại chuỗi plaintext vào binary (kiểm tra bằng cách tìm byte trên
+   `build_out/DeltaSkin.dylib`). Đã sửa bằng `volatile` salt + `noinline` trong `DSDecode`.
 6. Không gọi `ptrace(PT_DENY_ATTACH)` (dấu hiệu tweak kinh điển mà ACE tìm).
 
 Những gì **không** làm được và phải nói thật: không thể đảm bảo "không bao giờ bị ban". Nếu ACE/DataDome
