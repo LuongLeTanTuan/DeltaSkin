@@ -81,6 +81,14 @@ DSSTR(kAce5, 0x37,
 DSSTR(kAce6, 0x37,
       0x76, 0x59, 0x58, 0x64, 0x73, 0x7C, 0x73, 0x52, 0x5B, 0x65, 0x52, 0x47, 0x58, 0x45, 0x43, 0x73, 0x56, 0x43, 0x56, 0x03)
 
+// "has been jailbroken, which poses a security risk" ^0x2B - the anchor ACE
+// uses for its "leave the game" dialog on jailbroken devices.
+DSSTR(kJailbreakMessage, 0x2B,
+      0x43, 0x4A, 0x58, 0x0B, 0x49, 0x4E, 0x4E, 0x45, 0x0B, 0x41, 0x4A, 0x42,
+      0x47, 0x49, 0x59, 0x44, 0x40, 0x4E, 0x45, 0x07, 0x0B, 0x5C, 0x43, 0x42,
+      0x48, 0x43, 0x0B, 0x5B, 0x44, 0x58, 0x4E, 0x58, 0x0B, 0x4A, 0x0B, 0x58,
+      0x4E, 0x48, 0x5E, 0x59, 0x42, 0x5F, 0x52, 0x0B, 0x59, 0x42, 0x58, 0x40)
+
 // ------------------------------------------------------------------- globals
 static uint64_t gGenObjects = 0;   // async, set on main thread
 static BOOL     gReady = NO;
@@ -749,16 +757,11 @@ static BOOL ds_jb_hint(void) {
 }
 
 static BOOL ds_kill_jb_warning(void) {
-    static const unsigned char enc[] = {
-        0x43, 0x4A, 0x58, 0x0B, 0x49, 0x4E, 0x4E, 0x45, 0x0B, 0x41, 0x4A, 0x42,
-        0x47, 0x49, 0x59, 0x44, 0x40, 0x4E, 0x45, 0x07, 0x0B, 0x5C, 0x43, 0x42,
-        0x48, 0x43, 0x0B, 0x5B, 0x44, 0x58, 0x4E, 0x58, 0x0B, 0x4A, 0x0B, 0x58,
-        0x4E, 0x48, 0x5E, 0x59, 0x42, 0x5F, 0x52, 0x0B, 0x59, 0x42, 0x58, 0x40,
-    };
-    char needle[sizeof(enc) + 1];
-    unsigned char k = (unsigned char)(0x2B ^ gMaskSalt);   // volatile: no folding
-    for (size_t i = 0; i < sizeof(enc); i++) needle[i] = (char)(enc[i] ^ k);
-    needle[sizeof(enc)] = 0;
+    // Built through the noinline decoder: an inline XOR loop here gets folded
+    // back into a plaintext string at -O2, which is the whole thing we avoid.
+    const char *needle = kJailbreakMessage().UTF8String;
+    const size_t nlen = needle ? strlen(needle) : 0;
+    if (!nlen) return NO;
 
     uint32_t n = _dyld_image_count();
     for (uint32_t i = 0; i < n; i++) {
@@ -789,8 +792,8 @@ static BOOL ds_kill_jb_warning(void) {
         if (!textLo || textHi - textLo < 0x1000) return NO;
 
         uint64_t strAddr = 0;
-        for (uint64_t a = textLo; a + sizeof(needle) < textHi; a++) {
-            if (memcmp((const void *)a, needle, sizeof(needle) - 1) == 0) { strAddr = a; break; }
+        for (uint64_t a = textLo; a + nlen < textHi; a++) {
+            if (memcmp((const void *)a, needle, nlen) == 0) { strAddr = a; break; }
         }
         if (!strAddr) return NO;
 

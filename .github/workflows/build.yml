@@ -33,7 +33,7 @@ jobs:
           # clang drives ld64.lld itself; a bare `ld64.lld` name is not
           # guaranteed to exist across Ubuntu lld packaging.
           clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
-                -fobjc-arc -O2 -fuse-ld=lld \
+                -fobjc-arc -O2 -fuse-ld=lld -Wl,-x \
                 -framework Foundation -framework UIKit -framework CoreGraphics \
                 -dynamiclib -o build/DeltaSkin.dylib src/DeltaSkin.mm
           file build/DeltaSkin.dylib
