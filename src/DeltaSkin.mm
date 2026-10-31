@@ -246,7 +246,7 @@ static BOOL ds_find_gnames(void) {
             if (good < 1) continue;
 
             for (int i = 0; i < 4; i++) gNameBlocks[i] = *(uint64_t *)(p + 8 * i);
-            NSLog(@"[DeltaSkin] GNames @0x%llx", p);
+            NSLog(@"[DeltaSkin] pool @0x%llx", p);
             return YES;
         }
     }
@@ -333,7 +333,7 @@ static BOOL ds_find_gobjects(void) {
     }
     if (bestHits < 50) return NO;
     gGenObjects = best;
-    NSLog(@"[DeltaSkin] GObjects @0x%llx hits=%d", best, bestHits);
+    NSLog(@"[DeltaSkin] objects @0x%llx hits=%d", best, bestHits);
     return YES;
 }
 
@@ -492,8 +492,8 @@ static void ds_bootstrap(void) {
     gStatus = @"scanning";
     ds_collect_ranges();
     ds_locate_host();
-    if (!ds_find_gnames()) { gStatus = @"GNames not found"; return; }
-    if (!ds_find_gobjects()) { gStatus = @"GObjects not found"; return; }
+    if (!ds_find_gnames()) { gStatus = @"pool not found"; return; }
+    if (!ds_find_gobjects()) { gStatus = @"objects not found"; return; }
     gReady = YES;
     gStatus = @"ready";
     NSLog(@"[DeltaSkin] ready");
@@ -641,7 +641,7 @@ static void ds_bootstrap(void) {
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         if (!gReady) ds_bootstrap();
         NSString *s = gReady
-            ? [NSString stringWithFormat:@"ready - GNames 0x%llx - GObjects 0x%llx - ace %d/7",
+            ? [NSString stringWithFormat:@"ready - pool 0x%llx - obj 0x%llx - ace %d/7",
                                          (unsigned long long)0, (unsigned long long)gGenObjects, gAceHits]
             : gStatus;
         [self setStatusText:s];
