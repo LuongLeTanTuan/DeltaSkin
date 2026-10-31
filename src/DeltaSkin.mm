@@ -90,8 +90,14 @@ DSSTR(kJailbreakMessage, 0x2B,
       0x4E, 0x48, 0x5E, 0x59, 0x42, 0x5F, 0x52, 0x0B, 0x59, 0x42, 0x58, 0x40)
 
 // -------------------------------------------------------- weapon / skin table
-// Lifted from PxMenu.dylib: 85 weapon display names and 705 (weapon, skinId,
-// name) rows, so the picker offers exactly what the original menu offers.
+// Lifted from PxExtFFi (the vendor menu's own UI framework), 81 weapon groups
+// and 707 (weapon, skinId, name) rows. PxMenu.dylib's table was used before and
+// it was wrong: its "weapon" list carried skin entries as if they were weapons
+// ("ASh-12 Battle Rifle-Goose Goose Duck", "KC17 Assault Rifle-SAW"), so 22 of
+// its 85 "weapons" were really one-skin pseudo-groups that shadowed the real
+// gun. PxExtFFi stores each skin with its id and its full "Weapon - Skin"
+// display name, so the grouping here is derived from the vendor's own string,
+// not guessed.
 // The blob is XOR 0x5A so no weapon or skin name sits in the binary readable.
 #include "SkinTable.h"
 
