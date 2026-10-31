@@ -1,4 +1,4 @@
-// DeltaSkin — UE5 skin mod bridge for DeltaForceClient (iOS, arm64)
+// DeltaSkin - UE5 skin mod bridge for DeltaForceClient (iOS, arm64)
 // Standalone dylib. No Substrate/Cydia dependency: designed to be injected into
 // the sideloaded IPA (eSign/Sideloadly) so it also works on non-jailbroken iOS.
 //
@@ -12,7 +12,6 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
 #import <mach/vm_region.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -37,7 +36,7 @@ static NSString *DSDecode(const unsigned char *buf, size_t len, unsigned char ke
         return DSDecode(b, sizeof(b), key); \
     }
 
-��DSSTR(kClassWeaponDesc, 0x5A,
+--DSSTR(kClassWeaponDesc, 0x5A,
       0x17, 0x35, 0x3E, 0x2F, 0x36, 0x3B, 0x28, 0x0D, 0x3F, 0x3B, 0x2A, 0x35, 0x34, 0x1E, 0x3F, 0x29, 0x39)
 DSSTR(kClassGPWeaponDesc, 0x5A,
       0x1D, 0x0A, 0x17, 0x35, 0x3E, 0x2F, 0x36, 0x3B, 0x28, 0x0D, 0x3F, 0x3B, 0x2A, 0x35, 0x34, 0x1E, 0x3F, 0x29, 0x39)
@@ -99,14 +98,14 @@ static BOOL ds_readable_ptrs(uint64_t addr) { return ds_is_mapped(addr, sizeof(u
 static void ds_collect_ranges(void) {
     if (gRangeCount) return;
 
-    mach_vm_address_t address = 0;
+    vm_address_t address = 0;
     int guard = 0;
     while (guard++ < DS_MAX_RANGES) {
-        mach_vm_size_t size = 0;
+        vm_size_t size = 0;
         natural_t depth = 0;
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
-        kern_return_t kr = mach_vm_region_recurse(mach_task_self(), &address, &size, &depth,
+        kern_return_t kr = vm_region_recurse_64(mach_task_self(), &address, &size, &depth,
                                                  (vm_region_recurse_info_t)&info, &count);
         if (kr != KERN_SUCCESS || size == 0) break;
         if (!info.is_submap && (info.protection & VM_PROT_READ)) {
@@ -131,7 +130,7 @@ static void ds_locate_host(void) {
         base = base ? base + 1 : nm;
         if (strcmp(base, want.UTF8String) != 0) continue;
 
-        const struct mach_header_64 *mh = _dyld_get_image_header(i);
+        const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
         if (!mh || mh->magic != MH_MAGIC_64) continue;
 
         gHostHeader = (uint64_t)mh;
@@ -427,7 +426,7 @@ static int ds_apply_all(int skinId) {
 
     // Resolve each weapon class once, then apply everything that shares it.
     NSMutableArray<NSNumber *> *classes = [NSMutableArray array];
-    NSMutableArray<NSNumber *> *entries = [NSMutableArray array];
+    NSMutableArray<NSValue *> *entries = [NSMutableArray array];
     for (NSString *nm in ds_weapon_classes()) {
         uint64_t cls = ds_find_class(@[ nm ]);
         if (!cls) continue;
@@ -607,7 +606,7 @@ static void ds_bootstrap(void) {
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         if (!gReady) ds_bootstrap();
         NSString *s = gReady
-            ? [NSString stringWithFormat:@"ready · GNames 0x%llx · GObjects 0x%llx",
+            ? [NSString stringWithFormat:@"ready - GNames 0x%llx - GObjects 0x%llx",
                                          (unsigned long long)0, (unsigned long long)gGenObjects]
             : gStatus;
         [self setStatusText:s];
