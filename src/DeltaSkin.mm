@@ -25,9 +25,16 @@
 // ---------------------------------------------------------------- obfuscation
 // Engine identifiers are stored XOR'd so the strings never appear in __cstring.
 // This is cheap hygiene against naive string scanning by the anti-cheat.
+// The volatile salt is always 0; it exists so clang cannot constant-fold the
+// decoder and re-emit every plaintext string into the binary (it does that at
+// -O2 if the loop is provably constant, which is exactly what we must avoid).
+static volatile unsigned char gMaskSalt = 0;
+
+__attribute__((noinline))
 static NSString *DSDecode(const unsigned char *buf, size_t len, unsigned char key) {
     char tmp[128] = {0};
     if (len >= sizeof(tmp)) len = sizeof(tmp) - 1;
+    key ^= gMaskSalt;
     for (size_t i = 0; i < len; i++) tmp[i] = (char)(buf[i] ^ key);
     return [NSString stringWithUTF8String:tmp];
 }
@@ -56,6 +63,23 @@ DSSTR(kFnApplySkin, 0x41,
       0x00, 0x31, 0x31, 0x2D, 0x38, 0x12, 0x2A, 0x28, 0x2F)
 DSSTR(kHostImage, 0x13,
       0x57, 0x76, 0x7F, 0x67, 0x72, 0x55, 0x7C, 0x61, 0x70, 0x76, 0x50, 0x7F, 0x7A, 0x76, 0x7D, 0x67)
+
+// ACE export names stay encoded too: a dylib carrying "AnoSDK..." in plain
+// sight is the easiest thing in the world for ACE to find in the image list.
+DSSTR(kAce0, 0x37,
+      0x76, 0x59, 0x58, 0x64, 0x73, 0x7C, 0x70, 0x52, 0x43, 0x65, 0x52, 0x47, 0x58, 0x45, 0x43, 0x73, 0x56, 0x43, 0x56)
+DSSTR(kAce1, 0x37,
+      0x76, 0x59, 0x58, 0x64, 0x73, 0x7C, 0x70, 0x52, 0x43, 0x65, 0x52, 0x47, 0x58, 0x45, 0x43, 0x73, 0x56, 0x43, 0x56, 0x05)
+DSSTR(kAce2, 0x37,
+      0x76, 0x59, 0x58, 0x64, 0x73, 0x7C, 0x70, 0x52, 0x43, 0x65, 0x52, 0x47, 0x58, 0x45, 0x43, 0x73, 0x56, 0x43, 0x56, 0x04)
+DSSTR(kAce3, 0x37,
+      0x76, 0x59, 0x58, 0x64, 0x73, 0x7C, 0x70, 0x52, 0x43, 0x65, 0x52, 0x47, 0x58, 0x45, 0x43, 0x73, 0x56, 0x43, 0x56, 0x03)
+DSSTR(kAce4, 0x37,
+      0x76, 0x59, 0x58, 0x64, 0x73, 0x7C, 0x73, 0x52, 0x5B, 0x65, 0x52, 0x47, 0x58, 0x45, 0x43, 0x73, 0x56, 0x43, 0x56)
+DSSTR(kAce5, 0x37,
+      0x76, 0x59, 0x58, 0x64, 0x73, 0x7C, 0x73, 0x52, 0x5B, 0x65, 0x52, 0x47, 0x58, 0x45, 0x43, 0x73, 0x56, 0x43, 0x56, 0x04)
+DSSTR(kAce6, 0x37,
+      0x76, 0x59, 0x58, 0x64, 0x73, 0x7C, 0x73, 0x52, 0x5B, 0x65, 0x52, 0x47, 0x58, 0x45, 0x43, 0x73, 0x56, 0x43, 0x56, 0x03)
 
 // ------------------------------------------------------------------- globals
 static uint64_t gGenObjects = 0;   // async, set on main thread
@@ -701,18 +725,16 @@ static void *ds_ace_sym(const char *name) {
 // The four report getters + the three "drop it" calls. Killing both halves
 // means the host never receives a report and never acknowledges one.
 static int ds_install_ace(void) {
-    static const char *const names[] = {
-        "AnoSDKGetReportData",  "AnoSDKGetReportData2",
-        "AnoSDKGetReportData3", "AnoSDKGetReportData4",
-        "AnoSDKDelReportData",  "AnoSDKDelReportData3", "AnoSDKDelReportData4",
-    };
-    const size_t n = sizeof(names) / sizeof(names[0]);
+    NSArray<NSString *> *names = @[
+        kAce0(), kAce1(), kAce2(), kAce3(), kAce4(), kAce5(), kAce6(),
+    ];
     int ok = 0;
-    for (size_t i = 0; i < n; i++) {
-        void *p = ds_ace_sym(names[i]);
+    for (NSString *n in names) {
+        void *p = ds_ace_sym(n.UTF8String);
         if (p && ds_patch_ret0(p)) ok++;
     }
-    NSLog(@"[DeltaSkin] ACE report channel: %d/%zu neutralised", ok, n);
+    NSLog(@"[DeltaSkin] ACE report channel: %d/%lu neutralised",
+          ok, (unsigned long)names.count);
     return ok;
 }
 
@@ -734,7 +756,8 @@ static BOOL ds_kill_jb_warning(void) {
         0x4E, 0x48, 0x5E, 0x59, 0x42, 0x5F, 0x52, 0x0B, 0x59, 0x42, 0x58, 0x40,
     };
     char needle[sizeof(enc) + 1];
-    for (size_t i = 0; i < sizeof(enc); i++) needle[i] = (char)(enc[i] ^ 0x2B);
+    unsigned char k = (unsigned char)(0x2B ^ gMaskSalt);   // volatile: no folding
+    for (size_t i = 0; i < sizeof(enc); i++) needle[i] = (char)(enc[i] ^ k);
     needle[sizeof(enc)] = 0;
 
     uint32_t n = _dyld_image_count();
