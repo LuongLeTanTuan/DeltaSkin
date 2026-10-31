@@ -579,19 +579,33 @@ static void ds_bootstrap(void) {
 }
 
 // ------------------------------------------------------------------- the UI
-@interface DSMenu : NSObject <UIPickerViewDataSource, UIPickerViewDelegate>
-@property (nonatomic, strong) UIView *root;
-@property (nonatomic, strong) UIView *panel;
-@property (nonatomic, strong) UITextField *field;
-@property (nonatomic, strong) UILabel *status;
-@property (nonatomic, strong) UISegmentedControl *mode;
-@property (nonatomic, strong) UIPickerView *picker;
+// Flow cloned from the working no-jailbreak build (D:\delta\PxExtNoJB,
+// PxMenuView.m / PxStore.m): a floating button, a menu that lives in its own
+// UIWindow and is torn down on close, and action-sheet combos for
+// weapon -> skin. Two properties of that design matter more than the looks:
+//
+//   1. the button is a 52x52 view added to the game window. It is never a
+//      full-screen transparent container -- that is exactly what made the
+//      previous revision swallow every touch after the panel was hidden:
+//      a clear view with userInteractionEnabled = YES still wins hit-testing
+//      over everything underneath, hidden subviews notwithstanding.
+//   2. the menu window is hidden, detached from its scene and released on
+//      close. A hidden-but-still-attached window stays in the window list,
+//      takes key status back, and the game stops receiving touches.
+
+static void ds_toast(NSString *message);
+
+@interface DSMenu : NSObject
 @property (nonatomic, strong) UIButton *fab;
-@property (nonatomic, strong) UIButton *applyBtn;
-@property (nonatomic, strong) UIButton *restoreBtn;
+@property (nonatomic, strong) UIWindow *window;
+@property (nonatomic, strong) UIView *panel;
+@property (nonatomic, strong) UILabel *status;
+@property (nonatomic, strong) UIButton *weaponCombo;
+@property (nonatomic, strong) UIButton *skinCombo;
+@property (nonatomic, strong) UITextField *field;
 @property (nonatomic, assign) NSInteger weaponIdx;
 @property (nonatomic, assign) NSInteger skinIdx;
-@property (nonatomic, assign) BOOL open;
+@property (nonatomic, assign) BOOL dragging;
 @end
 
 @implementation DSMenu
@@ -603,204 +617,138 @@ static void ds_bootstrap(void) {
     return m;
 }
 
-// Attach to the app's own window instead of making a second key window: a new
-// UIWindow breaks UE4's scene/rotation handling and is an extra detection signal.
-- (UIWindow *)hostWindow {
-    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
-        if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        UIWindowScene *ws = (UIWindowScene *)sc;
-        for (UIWindow *w in ws.windows) {
-            if (w.isKeyWindow) return w;
-        }
-        if (ws.windows.count) return ws.windows.firstObject;
+// Lowest-level visible window that is not ours. Asking for "the key window"
+// after the menu closed can return the menu window itself and keep key input
+// away from the game, which is the second half of the "screen is dead" bug.
+static UIWindow *ds_host_window(void) {
+    UIWindow *best = nil;
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w.hidden) continue;
+        if (w.windowLevel >= UIWindowLevelAlert) continue;
+        if (!best || w.windowLevel < best.windowLevel) best = w;
     }
-    return UIApplication.sharedApplication.windows.firstObject;
+    return best;
 }
+
+// ------------------------------------------------------------ floating button
+static BOOL gFabInstalled = NO;
 
 - (void)install {
-    if (self.root) return;
-    UIWindow *host = [self hostWindow];
-    if (!host) return;
+    if (gFabInstalled || self.fab) return;
+    UIWindow *host = ds_host_window();
+    if (!host) {
+        // The game builds its window after the skin engine is ready; retry for
+        // a few seconds instead of giving up on the first miss.
+        static int tries = 0;
+        if (tries++ < 40) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ [self install]; });
+        }
+        return;
+    }
 
-    self.root = [[UIView alloc] initWithFrame:host.bounds];
-    self.root.backgroundColor = UIColor.clearColor;
-    self.root.userInteractionEnabled = YES;
-    self.root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [host addSubview:self.root];
-
+    CGFloat side = 52.0;
+    CGRect b = host.bounds;
     UIButton *fab = [UIButton buttonWithType:UIButtonTypeCustom];
-    fab.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.13 alpha:0.92];
-    fab.layer.cornerRadius = 27;
+    fab.frame = CGRectMake(b.size.width - side - 12.0, b.size.height * 0.35, side, side);
+    fab.backgroundColor = [UIColor colorWithRed:0.06 green:0.07 blue:0.09 alpha:0.92];
+    fab.layer.cornerRadius = side / 2.0;
     fab.layer.borderWidth = 1;
-    fab.layer.borderColor = [UIColor colorWithRed:0.35 green:0.9 blue:0.7 alpha:0.9].CGColor;
+    fab.layer.borderColor = [UIColor colorWithRed:0.20 green:0.85 blue:0.52 alpha:0.85].CGColor;
+    fab.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
     [fab setTitle:@"DS" forState:UIControlStateNormal];
-    [fab setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    [fab addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
+    [fab setTitleColor:[UIColor colorWithRed:0.35 green:0.95 blue:0.60 alpha:1]
+              forState:UIControlStateNormal];
+    [fab addTarget:self action:@selector(fabTapped) forControlEvents:UIControlEventTouchUpInside];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                         action:@selector(fabPan:)];
+    [fab addGestureRecognizer:pan];
+    [host addSubview:fab];
     self.fab = fab;
-    [self.root addSubview:fab];
+    gFabInstalled = YES;
+}
+
+- (void)fabTapped {
+    // A drag ends with the pan already back in Ended/Failed, so the flag is the
+    // only reliable signal that this touch was a drag and not a tap.
+    if (self.dragging) { self.dragging = NO; return; }
+    [self toggle];
+}
+
+- (void)fabPan:(UIPanGestureRecognizer *)pan {
+    UIView *host = self.fab.superview;
+    CGPoint t = [pan translationInView:host];
+    [pan setTranslation:CGPointZero inView:host];
+
+    CGRect bounds = host.bounds;
+    CGFloat half = self.fab.bounds.size.width / 2.0;
+    CGPoint c = CGPointMake(self.fab.center.x + t.x, self.fab.center.y + t.y);
+    c.x = MAX(half + 4.0, MIN(bounds.size.width - half - 4.0, c.x));
+    c.y = MAX(half + 4.0, MIN(bounds.size.height - half - 4.0, c.y));
+
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        self.dragging = YES;
+        self.fab.transform = CGAffineTransformMakeScale(1.08, 1.08);
+    } else if (pan.state == UIGestureRecognizerStateEnded ||
+               pan.state == UIGestureRecognizerStateCancelled) {
+        self.fab.transform = CGAffineTransformIdentity;
+    }
+    self.fab.center = c;
+}
+
+// ----------------------------------------------------------------- show / hide
+- (void)toggle {
+    if (self.window) [self hide];
+    else [self show];
+}
+
+- (void)show {
+    if (self.window) return;
+
+    UIWindow *w = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    w.windowLevel = UIWindowLevelAlert + 60;
+    w.backgroundColor = UIColor.clearColor;
+    w.rootViewController = [UIViewController new];
+    w.rootViewController.view.backgroundColor = UIColor.clearColor;
+    // A window with no scene never attaches on iOS 13+, so it would be built,
+    // hidden = NO, and invisible.
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+            if ([s isKindOfClass:UIWindowScene.class]) { w.windowScene = (UIWindowScene *)s; break; }
+        }
+    }
+    self.window = w;
 
     [self buildPanel];
-    [self.root addSubview:self.panel];
-    [self relayout];
+
+    UIView *root = w.rootViewController.view;
+    UIView *dim = [[UIView alloc] initWithFrame:root.bounds];
+    dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [dim addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                     action:@selector(hide)]];
+    [root addSubview:dim];
+    [root addSubview:self.panel];
+
+    w.hidden = NO;
+    [w makeKeyWindow];     // the ID field needs a key window to raise the keyboard
+    [self refresh];
 }
 
-// The game runs landscape, so panel height is driven by the screen, not by a
-// fixed constant: the picker absorbs the difference and nothing gets clipped.
-- (void)relayout {
-    CGRect b = self.root.bounds;
-    CGFloat w = MIN(300.0, b.size.width - 36.0);
-    CGFloat h = MIN(400.0, b.size.height - 16.0);
-    CGFloat y = (b.size.height - h) / 2.0;
-    if (y < 8) y = 8;
+- (void)hide {
+    UIWindow *w = self.window;
+    self.window = nil;
+    if (!w) return;
 
-    self.panel.frame = CGRectMake(18, y, w, h);
+    [self.field resignFirstResponder];
+    [self.panel removeFromSuperview];     // keep the panel, drop the window
 
-    CGFloat ph = MAX(96.0, h - 250.0);
-    self.mode.frame = CGRectMake(16, 58, w - 32, 32);
-    self.picker.frame = CGRectMake(8, 94, w - 16, ph);
-    self.field.frame = CGRectMake(16, 94 + ph + 8, w - 32, 38);
-    self.applyBtn.frame = CGRectMake(16, 94 + ph + 54, w - 32, 44);
-    self.restoreBtn.frame = CGRectMake(16, 94 + ph + 104, w - 32, 38);
+    w.rootViewController.view.userInteractionEnabled = NO;
+    w.hidden = YES;
+    if (@available(iOS 13.0, *)) w.windowScene = nil;   // not just hidden: detached
 
-    self.fab.frame = CGRectMake(b.size.width - 72, b.size.height - 76, 54, 54);
-}
-
-- (UILabel *)label:(NSString *)text size:(CGFloat)size color:(UIColor *)color {
-    UILabel *l = [UILabel new];
-    l.text = text;
-    l.font = [UIFont systemFontOfSize:size weight:UIFontWeightSemibold];
-    l.textColor = color;
-    return l;
-}
-
-- (void)buildPanel {
-    CGFloat w = 300;
-    self.panel = [[UIView alloc] initWithFrame:CGRectZero];
-    self.panel.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.11 alpha:0.97];
-    self.panel.layer.cornerRadius = 16;
-    self.panel.layer.borderWidth = 1;
-    self.panel.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
-    self.panel.hidden = YES;
-
-    UILabel *title = [self label:@"SKIN MOD" size:15 color:UIColor.whiteColor];
-    title.frame = CGRectMake(16, 14, w - 32, 20);
-    [self.panel addSubview:title];
-
-    self.status = [self label:@"idle" size:11 color:[UIColor colorWithWhite:1 alpha:0.55]];
-    self.status.frame = CGRectMake(16, 34, w - 32, 16);
-    self.status.numberOfLines = 0;
-    [self.panel addSubview:self.status];
-
-    // Two dropdowns, same shape as the original menu: pick a weapon, then its
-    // skin list. One wheel is enough; the segmented control switches which of
-    // the two lists it is showing, so long weapon names keep the full width.
-    self.mode = [[UISegmentedControl alloc] initWithItems:@[ @"WEAPON", @"SKIN" ]];
-    self.mode.frame = CGRectMake(16, 58, w - 32, 32);
-    self.mode.selectedSegmentIndex = 0;
-    if (@available(iOS 13.0, *)) {
-        self.mode.selectedSegmentTintColor = [UIColor colorWithRed:0.25 green:0.85 blue:0.62 alpha:1];
-    }
-    [self.mode addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
-    [self.panel addSubview:self.mode];
-
-    self.picker = [[UIPickerView alloc] initWithFrame:CGRectMake(8, 94, w - 16, 150)];
-    self.picker.dataSource = self;
-    self.picker.delegate = self;
-    [self.panel addSubview:self.picker];
-
-    self.field = [[UITextField alloc] initWithFrame:CGRectMake(16, 252, w - 32, 38)];
-    self.field.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
-    self.field.layer.cornerRadius = 10;
-    self.field.textColor = UIColor.whiteColor;
-    self.field.keyboardType = UIKeyboardTypeDefault;
-    self.field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    self.field.attributedPlaceholder =
-        [[NSAttributedString alloc] initWithString:@"skin id (decimal or 0x...)"
-                                        attributes:@{NSForegroundColorAttributeName:[UIColor colorWithWhite:1 alpha:0.35]}];
-    self.field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 38)];
-    self.field.leftViewMode = UITextFieldViewModeAlways;
-    [self.panel addSubview:self.field];
-
-    UIButton *apply = [UIButton buttonWithType:UIButtonTypeSystem];
-    apply.frame = CGRectMake(16, 296, w - 32, 44);
-    apply.backgroundColor = [UIColor colorWithRed:0.25 green:0.85 blue:0.62 alpha:1];
-    apply.layer.cornerRadius = 10;
-    [apply setTitle:@"APPLY SKIN" forState:UIControlStateNormal];
-    [apply setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
-    [apply addTarget:self action:@selector(applyTapped) forControlEvents:UIControlEventTouchUpInside];
-    self.applyBtn = apply;
-    [self.panel addSubview:apply];
-
-    UIButton *restore = [UIButton buttonWithType:UIButtonTypeSystem];
-    restore.frame = CGRectMake(16, 346, w - 32, 38);
-    restore.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
-    restore.layer.cornerRadius = 10;
-    [restore setTitle:@"RESTORE (skin 0)" forState:UIControlStateNormal];
-    [restore setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    [restore addTarget:self action:@selector(restoreTapped) forControlEvents:UIControlEventTouchUpInside];
-    self.restoreBtn = restore;
-    [self.panel addSubview:restore];
-
-    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(w - 44, 10, 34, 34);
-    [close setTitle:@"x" forState:UIControlStateNormal];
-    [close setTitleColor:[UIColor colorWithWhite:1 alpha:0.6] forState:UIControlStateNormal];
-    [close addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
-    [self.panel addSubview:close];
-
-    [self reloadPickers];
-}
-
-// ------------------------------------------------------------------ pickers
-- (NSInteger)numberOfComponentsInPickerView:(UIPickerView *)picker {
-    return 1;
-}
-
-- (NSInteger)pickerView:(UIPickerView *)picker numberOfRowsInComponent:(NSInteger)component {
-    if (self.mode.selectedSegmentIndex == 0) return (NSInteger)ds_weapon_count();
-    return (NSInteger)ds_skin_count((NSUInteger)self.weaponIdx);
-}
-
-- (NSString *)pickerView:(UIPickerView *)picker titleForRow:(NSInteger)row forComponent:(NSInteger)component {
-    if (self.mode.selectedSegmentIndex == 0) return ds_weapon_name((NSUInteger)row);
-    return ds_skin_name((NSUInteger)self.weaponIdx, (NSUInteger)row);
-}
-
-- (CGFloat)pickerView:(UIPickerView *)picker widthForComponent:(NSInteger)component {
-    return 260;
-}
-
-- (void)pickerView:(UIPickerView *)picker didSelectRow:(NSInteger)row inComponent:(NSInteger)component {
-    if (self.mode.selectedSegmentIndex == 0) {
-        // Weapon chosen -> jump straight to its skins, first entry preselected
-        // (the original menu does the same in sub_7948).
-        self.weaponIdx = row;
-        self.skinIdx = 0;
-        self.mode.selectedSegmentIndex = 1;
-        [self reloadPickers];
-    } else {
-        self.skinIdx = row;
-    }
-    [self syncField];
-}
-
-- (void)syncField {
-    uint32_t sid = ds_skin_id((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx);
-    self.field.text = [NSString stringWithFormat:@"0x%08X", sid];
-}
-
-- (void)reloadPickers {
-    [self.picker reloadAllComponents];
-    NSUInteger n = self.mode.selectedSegmentIndex == 0
-        ? ds_weapon_count()
-        : ds_skin_count((NSUInteger)self.weaponIdx);
-    NSUInteger sel = (NSUInteger)(self.mode.selectedSegmentIndex == 0 ? self.weaponIdx : self.skinIdx);
-    if (n && sel >= n) { sel = 0; self.skinIdx = 0; }
-    if (n) [self.picker selectRow:(NSInteger)sel inComponent:0 animated:NO];
-}
-
-- (void)modeChanged {
-    [self reloadPickers];
+    UIWindow *target = ds_host_window();
+    if (target) [target makeKeyWindow];
 }
 
 - (void)setStatusText:(NSString *)s {
@@ -810,56 +758,287 @@ static void ds_bootstrap(void) {
     });
 }
 
-- (void)toggle {
-    self.open = !self.open;
-    self.panel.hidden = !self.open;
-    if (self.open) {
-        self.status.text = gStatus;
-        [self relayout];
-        [self reloadPickers];
-        [self runReport];
+// ------------------------------------------------------------------- the panel
+static UILabel *ds_label(NSString *text, CGFloat size, UIColor *color) {
+    UILabel *l = [UILabel new];
+    l.text = text;
+    l.font = [UIFont systemFontOfSize:size weight:UIFontWeightSemibold];
+    l.textColor = color;
+    return l;
+}
+
+static UIButton *ds_row_button(NSString *title, id target, SEL action) {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+    b.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    b.layer.cornerRadius = 8;
+    b.titleLabel.font = [UIFont systemFontOfSize:12];
+    b.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    b.titleEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
+    b.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor colorWithWhite:0.87 alpha:1] forState:UIControlStateNormal];
+    [b addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
+- (UILabel *)sectionLabel:(NSString *)text y:(CGFloat)y width:(CGFloat)w {
+    UILabel *l = ds_label(text, 10, [UIColor colorWithWhite:1 alpha:0.35]);
+    l.frame = CGRectMake(16, y, w - 32, 14);
+    return l;
+}
+
+- (void)buildPanel {
+    if (self.panel) return;
+
+    CGRect screen = UIScreen.mainScreen.bounds;
+    CGFloat w = MIN(screen.size.width - 32.0, 380.0);
+    CGFloat h = 340.0;
+
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((screen.size.width - w) / 2.0,
+                                                             (screen.size.height - h) / 2.0,
+                                                             w, h)];
+    panel.backgroundColor = [UIColor colorWithRed:0.055 green:0.058 blue:0.070 alpha:0.98];
+    panel.layer.cornerRadius = 16;
+    panel.layer.borderWidth = 1;
+    panel.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.08].CGColor;
+    self.panel = panel;
+
+    UILabel *title = ds_label(@"SKIN MOD", 15, [UIColor colorWithWhite:0.95 alpha:1]);
+    title.frame = CGRectMake(16, 12, w - 72, 20);
+    [panel addSubview:title];
+
+    self.status = ds_label(gStatus, 10, [UIColor colorWithWhite:0.45 alpha:1]);
+    self.status.frame = CGRectMake(16, 30, w - 72, 14);
+    self.status.lineBreakMode = NSLineBreakByTruncatingTail;
+    [panel addSubview:self.status];
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    close.frame = CGRectMake(w - 46, 6, 40, 40);
+    [close setTitle:@"\u2715" forState:UIControlStateNormal];
+    [close setTitleColor:[UIColor colorWithWhite:0.55 alpha:1] forState:UIControlStateNormal];
+    [close.titleLabel setFont:[UIFont systemFontOfSize:17]];
+    [close addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:close];
+
+    [panel addSubview:[self sectionLabel:@"CATALOG PICKER" y:56 width:w]];
+
+    UILabel *wl = ds_label(@"Weapon", 12, [UIColor colorWithWhite:0.82 alpha:1]);
+    wl.frame = CGRectMake(16, 78, 100, 18);
+    [panel addSubview:wl];
+
+    self.weaponCombo = ds_row_button(@"-", self, @selector(weaponTapped));
+    self.weaponCombo.frame = CGRectMake(w - 176, 72, 160, 32);
+    [panel addSubview:self.weaponCombo];
+
+    UILabel *sl = ds_label(@"Skin", 12, [UIColor colorWithWhite:0.82 alpha:1]);
+    sl.frame = CGRectMake(16, 118, 100, 18);
+    [panel addSubview:sl];
+
+    self.skinCombo = ds_row_button(@"-", self, @selector(skinTapped));
+    self.skinCombo.frame = CGRectMake(w - 176, 112, 160, 32);
+    [panel addSubview:self.skinCombo];
+
+    UILabel *cl = ds_label(@"Custom ID", 12, [UIColor colorWithWhite:0.82 alpha:1]);
+    cl.frame = CGRectMake(16, 158, 100, 18);
+    [panel addSubview:cl];
+
+    self.field = [[UITextField alloc] initWithFrame:CGRectMake(w - 176, 152, 160, 32)];
+    self.field.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    self.field.layer.cornerRadius = 8;
+    self.field.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+    self.field.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
+    self.field.textAlignment = NSTextAlignmentCenter;
+    self.field.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
+    self.field.returnKeyType = UIReturnKeyDone;
+    self.field.autocorrectionType = UITextAutocorrectionTypeNo;
+    self.field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    self.field.attributedPlaceholder =
+        [[NSAttributedString alloc] initWithString:@"0x8588D162"
+                                        attributes:@{NSForegroundColorAttributeName:
+                                                         [UIColor colorWithWhite:1 alpha:0.22]}];
+    [panel addSubview:self.field];
+
+    [panel addSubview:[self sectionLabel:@"ACTIONS" y:196 width:w]];
+
+    UIButton *apply = ds_row_button(@"Apply Skin", self, @selector(applyTapped));
+    apply.frame = CGRectMake(16, 218, w - 32, 38);
+    apply.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    apply.backgroundColor = [UIColor colorWithRed:0.20 green:0.80 blue:0.50 alpha:0.95];
+    [apply setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
+    apply.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    [panel addSubview:apply];
+
+    UIButton *restore = ds_row_button(@"Restore Default (0)", self, @selector(restoreTapped));
+    restore.frame = CGRectMake(16, 262, w - 32, 36);
+    restore.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    [panel addSubview:restore];
+
+    UIButton *runtime = ds_row_button(@"Runtime Status", self, @selector(statusTapped));
+    runtime.frame = CGRectMake(16, 304, w - 32, 30);
+    runtime.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    [panel addSubview:runtime];
+}
+
+// ------------------------------------------------------------------ selection
+- (void)refresh {
+    if (!self.panel) return;
+
+    [self.weaponCombo setTitle:[NSString stringWithFormat:@"%@ \u25BE",
+                                ds_weapon_name((NSUInteger)self.weaponIdx)]
+                      forState:UIControlStateNormal];
+
+    NSUInteger n = ds_skin_count((NSUInteger)self.weaponIdx);
+    NSString *sn = n ? ds_skin_name((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx)
+                     : @"Default / None";
+    [self.skinCombo setTitle:[NSString stringWithFormat:@"%@ \u25BE", sn]
+                    forState:UIControlStateNormal];
+    self.skinCombo.enabled = (n > 0);
+
+    self.status.text = gStatus;
+    if (self.field.text.length == 0) [self syncFieldFromSelection];
+}
+
+- (void)presentOptions:(NSArray<NSString *> *)options
+                 title:(NSString *)title
+               handler:(void (^)(NSInteger))handler {
+    UIViewController *host = self.window.rootViewController;
+    if (!host || options.count == 0) return;
+
+    UIAlertController *sheet =
+        [UIAlertController alertControllerWithTitle:title
+                                            message:nil
+                                     preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSInteger i = 0; i < (NSInteger)options.count; i++) {
+        [sheet addAction:[UIAlertAction actionWithTitle:options[i]
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) { handler(i); }]];
     }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    // An action sheet without a source view traps on iPad.
+    if (sheet.popoverPresentationController) {
+        sheet.popoverPresentationController.sourceView = self.panel;
+        sheet.popoverPresentationController.sourceRect = self.panel.bounds;
+    }
+    [host presentViewController:sheet animated:YES completion:nil];
 }
 
-- (void)runReport {
-    NSUInteger weapons = ds_weapon_count();   // main thread: warms the table too
-    dispatch_async(dispatch_get_global_queue(0, 0), ^{
-        if (!gReady) ds_bootstrap();
-        NSString *s = gReady
-            ? [NSString stringWithFormat:@"ready - %lu weapons - ace %d/7",
-                                         (unsigned long)weapons, gAceHits]
-            : gStatus;
-        [self setStatusText:s];
-    });
+- (void)weaponTapped {
+    NSUInteger count = ds_weapon_count();
+    NSMutableArray<NSString *> *options = [NSMutableArray arrayWithCapacity:count];
+    for (NSUInteger i = 0; i < count; i++) [options addObject:ds_weapon_name(i)];
+
+    __weak typeof(self) weakSelf = self;
+    [self presentOptions:options title:@"Weapon" handler:^(NSInteger idx) {
+        DSMenu *me = weakSelf;
+        if (!me) return;
+        me.weaponIdx = idx;
+        me.skinIdx = 0;
+        me.field.text = @"";
+        [me refresh];
+    }];
 }
 
-static unsigned long long ds_parse_id(NSString *s) {
-    NSString *t = [s stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-    if (!t.length) return 0;
-    if ([t hasPrefix:@"0x"] || [t hasPrefix:@"0X"]) return strtoull(t.UTF8String, NULL, 16);
-    return strtoull(t.UTF8String, NULL, 10);
+- (void)skinTapped {
+    NSUInteger count = ds_skin_count((NSUInteger)self.weaponIdx);
+    if (!count) return;
+
+    NSMutableArray<NSString *> *options = [NSMutableArray arrayWithCapacity:count];
+    for (NSUInteger i = 0; i < count; i++) {
+        [options addObject:ds_skin_name((NSUInteger)self.weaponIdx, i)];
+    }
+
+    __weak typeof(self) weakSelf = self;
+    [self presentOptions:options title:@"Skin" handler:^(NSInteger idx) {
+        DSMenu *me = weakSelf;
+        if (!me) return;
+        me.skinIdx = idx;
+        [me refresh];
+    }];
 }
 
+- (void)syncFieldFromSelection {
+    uint32_t sid = ds_skin_id((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx);
+    if (sid) self.field.text = [NSString stringWithFormat:@"0x%08X", sid];
+}
+
+// -------------------------------------------------------------------- actions
 - (void)applyTapped {
     [self.field resignFirstResponder];
-    if (!self.field.text.length) [self syncField];   // picker selection wins
-    int skinId = (int)ds_parse_id(self.field.text);
+
+    NSString *raw = [self.field.text stringByTrimmingCharactersInSet:
+                     NSCharacterSet.whitespaceCharacterSet];
+    int32_t skinId = 0;
+    if (raw.length) {
+        skinId = (int32_t)strtoul(raw.UTF8String, NULL, 0);
+    } else {
+        skinId = (int32_t)ds_skin_id((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx);
+    }
+    if (skinId == 0) {
+        ds_toast(@"Select a skin or enter a valid ID first.");
+        return;
+    }
+
     [self setStatusText:@"applying..."];
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         if (!gReady) ds_bootstrap();
         if (!gReady) { [self setStatusText:gStatus]; return; }
         int n = ds_apply_all(skinId);
-        [self setStatusText:n > 0 ? [NSString stringWithFormat:@"applied 0x%08X to %d object(s)", skinId, n]
-                                  : [NSString stringWithFormat:@"no target matched (code %d)", n]];
+        NSString *msg = n > 0
+            ? [NSString stringWithFormat:@"Skin 0x%X applied to %d object(s).", skinId, n]
+            : [NSString stringWithFormat:@"Nothing applied (code %d). Hold the gun in a match.", n];
+        [self setStatusText:msg];
+        ds_toast(msg);
     });
 }
 
 - (void)restoreTapped {
+    [self.field resignFirstResponder];
     self.field.text = @"0";
-    [self applyTapped];
+    [self setStatusText:@"restoring..."];
+    dispatch_async(dispatch_get_global_queue(0, 0), ^{
+        if (!gReady) ds_bootstrap();
+        if (!gReady) { [self setStatusText:gStatus]; return; }
+        int n = ds_apply_all(0);
+        NSString *msg = n > 0 ? @"Default weapon appearance restored."
+                              : @"Nothing to restore yet (hold the weapon in a match).";
+        [self setStatusText:msg];
+        ds_toast(msg);
+    });
+}
+
+- (void)statusTapped {
+    ds_toast([NSString stringWithFormat:@"%@\n%lu weapons / ace %d/7",
+              gStatus, (unsigned long)ds_weapon_count(), gAceHits]);
 }
 
 @end
+
+static void ds_toast(NSString *message) {
+    if (message.length == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *host = nil;
+        UIWindow *menu = [DSMenu shared].window;
+        if (menu && !menu.hidden) host = menu.rootViewController;
+        if (!host) {
+            for (UIWindow *w in UIApplication.sharedApplication.windows) {
+                if (w.isKeyWindow) { host = w.rootViewController; break; }
+            }
+        }
+        while (host.presentedViewController) host = host.presentedViewController;
+        if (!host) return;
+
+        UIAlertController *alert =
+            [UIAlertController alertControllerWithTitle:@"DeltaSkin"
+                                                message:message
+                                         preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:nil]];
+        [host presentViewController:alert animated:YES completion:nil];
+    });
+}
 
 // ----------------------------------------------------------------- antiban
 // Kept deliberately narrow: we never touch anogs/ACE code, never list our own
