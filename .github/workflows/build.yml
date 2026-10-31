@@ -7,21 +7,34 @@ on:
 
 jobs:
   dylib:
-    runs-on: macos-14
+    runs-on: ubuntu-latest
+    container: ghcr.io/theos/theos:latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Toolchain inventory
+        run: |
+          echo "== theos =="; ls -d /opt/theos 2>/dev/null || true
+          echo "== sdks ==";   ls /opt/theos/sdks 2>/dev/null | head || true
+          echo "== toolchain =="; ls /opt/theos/toolchain 2>/dev/null || true
+          echo "== clang =="; find / -maxdepth 6 -name 'clang++' -type f 2>/dev/null | head -5 || true
 
       - name: Build arm64 dylib
         run: |
           set -euo pipefail
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          THEOS="${THEOS:-/opt/theos}"
+          CLANG=$(find "$THEOS/toolchain" /usr -name 'clang++' -type f 2>/dev/null | head -1)
+          test -n "$CLANG" || { echo "no clang++"; exit 1; }
+          SDK=$(ls -d "$THEOS"/sdks/iPhoneOS*.sdk 2>/dev/null | sort -V | tail -1)
+          test -n "$SDK" || { echo "no iOS SDK"; exit 1; }
+          echo "clang=$CLANG"; echo "sdk=$SDK"
           mkdir -p build
-          xcrun --sdk iphoneos clang -arch arm64 \
-            -isysroot "$SDK" -miphoneos-version-min=14.0 \
-            -fobjc-arc -O2 \
+          "$CLANG" -target arm64-apple-ios14.0 -isysroot "$SDK" \
+            -fobjc-arc -O2 -fmodules -F"$SDK/System/Library/Frameworks" \
             -framework Foundation -framework UIKit -framework CoreGraphics \
             -dynamiclib -o build/DeltaSkin.dylib src/DeltaSkin.mm
           file build/DeltaSkin.dylib
+          ls -l build/DeltaSkin.dylib
 
       - uses: actions/upload-artifact@v4
         with:
