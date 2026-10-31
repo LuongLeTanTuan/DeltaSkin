@@ -89,6 +89,85 @@ DSSTR(kJailbreakMessage, 0x2B,
       0x48, 0x43, 0x0B, 0x5B, 0x44, 0x58, 0x4E, 0x58, 0x0B, 0x4A, 0x0B, 0x58,
       0x4E, 0x48, 0x5E, 0x59, 0x42, 0x5F, 0x52, 0x0B, 0x59, 0x42, 0x58, 0x40)
 
+// -------------------------------------------------------- weapon / skin table
+// Lifted from PxMenu.dylib: 85 weapon display names and 705 (weapon, skinId,
+// name) rows, so the picker offers exactly what the original menu offers.
+// The blob is XOR 0x5A so no weapon or skin name sits in the binary readable.
+#include "SkinTable.h"
+
+static NSArray<NSString *> *gWeaponNames = nil;
+static NSArray<NSArray<NSString *> *> *gSkinNames = nil;
+static NSArray<NSArray<NSNumber *> *> *gSkinIds = nil;
+
+__attribute__((noinline))
+static NSString *ds_blob_str(const unsigned char *p, size_t n) {
+    if (n >= 256) return @"";
+    char tmp[256];
+    unsigned char k = (unsigned char)(0x5A ^ gMaskSalt);
+    for (size_t i = 0; i < n; i++) tmp[i] = (char)(p[i] ^ k);
+    tmp[n] = 0;
+    return [NSString stringWithUTF8String:tmp] ?: @"";
+}
+
+// Decoded once, on the main thread (only the picker touches these arrays).
+static void ds_load_table(void) {
+    if (gWeaponNames) return;
+    const unsigned char *p = ds_blob;
+
+    NSMutableArray<NSString *> *wn = [NSMutableArray arrayWithCapacity:DS_WEAPON_COUNT];
+    for (int i = 0; i < DS_WEAPON_COUNT; i++) {
+        size_t n = *p++;
+        [wn addObject:ds_blob_str(p, n)];
+        p += n;
+    }
+
+    NSMutableArray<NSMutableArray<NSString *> *> *names = [NSMutableArray array];
+    NSMutableArray<NSMutableArray<NSNumber *> *> *ids = [NSMutableArray array];
+    for (int i = 0; i < DS_WEAPON_COUNT; i++) {
+        [names addObject:[NSMutableArray array]];
+        [ids addObject:[NSMutableArray array]];
+    }
+
+    for (int r = 0; r < DS_SKIN_ROW_COUNT; r++) {
+        unsigned w = *p++;
+        uint32_t sid = 0;
+        memcpy(&sid, p, sizeof(sid));           // little-endian on both targets
+        p += sizeof(sid);
+        size_t n = *p++;
+        NSString *nm = ds_blob_str(p, n);
+        p += n;
+        if (w >= DS_WEAPON_COUNT) continue;
+        [names[w] addObject:nm];
+        [ids[w] addObject:@(sid)];
+    }
+
+    gWeaponNames = wn;
+    gSkinNames = names;
+    gSkinIds = ids;
+}
+
+static NSUInteger ds_weapon_count(void) { ds_load_table(); return gWeaponNames.count; }
+
+static NSString *ds_weapon_name(NSUInteger i) {
+    ds_load_table();
+    return i < gWeaponNames.count ? gWeaponNames[i] : @"";
+}
+
+static NSUInteger ds_skin_count(NSUInteger w) {
+    ds_load_table();
+    return w < gSkinNames.count ? gSkinNames[w].count : 0;
+}
+
+static NSString *ds_skin_name(NSUInteger w, NSUInteger i) {
+    ds_load_table();
+    return (w < gSkinNames.count && i < gSkinNames[w].count) ? gSkinNames[w][i] : @"";
+}
+
+static uint32_t ds_skin_id(NSUInteger w, NSUInteger i) {
+    ds_load_table();
+    return (w < gSkinIds.count && i < gSkinIds[w].count) ? gSkinIds[w][i].unsignedIntValue : 0;
+}
+
 // ------------------------------------------------------------------- globals
 static uint64_t gGenObjects = 0;   // async, set on main thread
 static BOOL     gReady = NO;
@@ -500,11 +579,15 @@ static void ds_bootstrap(void) {
 }
 
 // ------------------------------------------------------------------- the UI
-@interface DSMenu : NSObject
+@interface DSMenu : NSObject <UIPickerViewDataSource, UIPickerViewDelegate>
 @property (nonatomic, strong) UIView *root;
 @property (nonatomic, strong) UIView *panel;
 @property (nonatomic, strong) UITextField *field;
 @property (nonatomic, strong) UILabel *status;
+@property (nonatomic, strong) UISegmentedControl *mode;
+@property (nonatomic, strong) UIPickerView *picker;
+@property (nonatomic, assign) NSInteger weaponIdx;
+@property (nonatomic, assign) NSInteger skinIdx;
 @property (nonatomic, assign) BOOL open;
 @end
 
@@ -542,7 +625,7 @@ static void ds_bootstrap(void) {
     [host addSubview:self.root];
 
     UIButton *fab = [UIButton buttonWithType:UIButtonTypeCustom];
-    fab.frame = CGRectMake(18, 120, 54, 54);
+    fab.frame = CGRectMake(18, 56, 54, 54);
     fab.backgroundColor = [UIColor colorWithRed:0.08 green:0.09 blue:0.13 alpha:0.92];
     fab.layer.cornerRadius = 27;
     fab.layer.borderWidth = 1;
@@ -566,7 +649,8 @@ static void ds_bootstrap(void) {
 
 - (void)buildPanel {
     CGFloat w = 300;
-    self.panel = [[UIView alloc] initWithFrame:CGRectMake(18, 190, w, 250)];
+    CGFloat h = 402;
+    self.panel = [[UIView alloc] initWithFrame:CGRectMake(18, 118, w, h)];
     self.panel.backgroundColor = [UIColor colorWithRed:0.07 green:0.08 blue:0.11 alpha:0.97];
     self.panel.layer.cornerRadius = 16;
     self.panel.layer.borderWidth = 1;
@@ -582,21 +666,38 @@ static void ds_bootstrap(void) {
     self.status.numberOfLines = 0;
     [self.panel addSubview:self.status];
 
-    self.field = [[UITextField alloc] initWithFrame:CGRectMake(16, 62, w - 32, 40)];
+    // Two dropdowns, same shape as the original menu: pick a weapon, then its
+    // skin list. One wheel is enough; the segmented control switches which of
+    // the two lists it is showing, so long weapon names keep the full width.
+    self.mode = [[UISegmentedControl alloc] initWithItems:@[ @"WEAPON", @"SKIN" ]];
+    self.mode.frame = CGRectMake(16, 58, w - 32, 32);
+    self.mode.selectedSegmentIndex = 0;
+    if (@available(iOS 13.0, *)) {
+        self.mode.selectedSegmentTintColor = [UIColor colorWithRed:0.25 green:0.85 blue:0.62 alpha:1];
+    }
+    [self.mode addTarget:self action:@selector(modeChanged) forControlEvents:UIControlEventValueChanged];
+    [self.panel addSubview:self.mode];
+
+    self.picker = [[UIPickerView alloc] initWithFrame:CGRectMake(8, 94, w - 16, 150)];
+    self.picker.dataSource = self;
+    self.picker.delegate = self;
+    [self.panel addSubview:self.picker];
+
+    self.field = [[UITextField alloc] initWithFrame:CGRectMake(16, 252, w - 32, 38)];
     self.field.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
     self.field.layer.cornerRadius = 10;
     self.field.textColor = UIColor.whiteColor;
-    self.field.keyboardType = UIKeyboardTypeNumberPad;
-    self.field.placeholder = @"skin id (decimal or 0x...)";
+    self.field.keyboardType = UIKeyboardTypeDefault;
+    self.field.autocapitalizationType = UITextAutocapitalizationTypeNone;
     self.field.attributedPlaceholder =
         [[NSAttributedString alloc] initWithString:@"skin id (decimal or 0x...)"
                                         attributes:@{NSForegroundColorAttributeName:[UIColor colorWithWhite:1 alpha:0.35]}];
-    self.field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 40)];
+    self.field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 12, 38)];
     self.field.leftViewMode = UITextFieldViewModeAlways;
     [self.panel addSubview:self.field];
 
     UIButton *apply = [UIButton buttonWithType:UIButtonTypeSystem];
-    apply.frame = CGRectMake(16, 112, w - 32, 44);
+    apply.frame = CGRectMake(16, 296, w - 32, 44);
     apply.backgroundColor = [UIColor colorWithRed:0.25 green:0.85 blue:0.62 alpha:1];
     apply.layer.cornerRadius = 10;
     [apply setTitle:@"APPLY SKIN" forState:UIControlStateNormal];
@@ -605,7 +706,7 @@ static void ds_bootstrap(void) {
     [self.panel addSubview:apply];
 
     UIButton *restore = [UIButton buttonWithType:UIButtonTypeSystem];
-    restore.frame = CGRectMake(16, 164, w - 32, 40);
+    restore.frame = CGRectMake(16, 346, w - 32, 38);
     restore.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
     restore.layer.cornerRadius = 10;
     [restore setTitle:@"RESTORE (skin 0)" forState:UIControlStateNormal];
@@ -619,6 +720,60 @@ static void ds_bootstrap(void) {
     [close setTitleColor:[UIColor colorWithWhite:1 alpha:0.6] forState:UIControlStateNormal];
     [close addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
     [self.panel addSubview:close];
+
+    [self reloadPickers];
+}
+
+// ------------------------------------------------------------------ pickers
+- (NSInteger)numberOfComponentsInPickerView:(UIPickerView *)picker {
+    return 1;
+}
+
+- (NSInteger)pickerView:(UIPickerView *)picker numberOfRowsInComponent:(NSInteger)component {
+    if (self.mode.selectedSegmentIndex == 0) return (NSInteger)ds_weapon_count();
+    return (NSInteger)ds_skin_count((NSUInteger)self.weaponIdx);
+}
+
+- (NSString *)pickerView:(UIPickerView *)picker titleForRow:(NSInteger)row forComponent:(NSInteger)component {
+    if (self.mode.selectedSegmentIndex == 0) return ds_weapon_name((NSUInteger)row);
+    return ds_skin_name((NSUInteger)self.weaponIdx, (NSUInteger)row);
+}
+
+- (CGFloat)pickerView:(UIPickerView *)picker widthForComponent:(NSInteger)component {
+    return 260;
+}
+
+- (void)pickerView:(UIPickerView *)picker didSelectRow:(NSInteger)row inComponent:(NSInteger)component {
+    if (self.mode.selectedSegmentIndex == 0) {
+        // Weapon chosen -> jump straight to its skins, first entry preselected
+        // (the original menu does the same in sub_7948).
+        self.weaponIdx = row;
+        self.skinIdx = 0;
+        self.mode.selectedSegmentIndex = 1;
+        [self reloadPickers];
+    } else {
+        self.skinIdx = row;
+    }
+    [self syncField];
+}
+
+- (void)syncField {
+    uint32_t sid = ds_skin_id((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx);
+    self.field.text = [NSString stringWithFormat:@"0x%08X", sid];
+}
+
+- (void)reloadPickers {
+    [self.picker reloadAllComponents];
+    NSUInteger n = self.mode.selectedSegmentIndex == 0
+        ? ds_weapon_count()
+        : ds_skin_count((NSUInteger)self.weaponIdx);
+    NSUInteger sel = (NSUInteger)(self.mode.selectedSegmentIndex == 0 ? self.weaponIdx : self.skinIdx);
+    if (n && sel >= n) { sel = 0; self.skinIdx = 0; }
+    if (n) [self.picker selectRow:(NSInteger)sel inComponent:0 animated:NO];
+}
+
+- (void)modeChanged {
+    [self reloadPickers];
 }
 
 - (void)setStatusText:(NSString *)s {
@@ -633,16 +788,18 @@ static void ds_bootstrap(void) {
     self.panel.hidden = !self.open;
     if (self.open) {
         self.status.text = gStatus;
+        [self reloadPickers];
         [self runReport];
     }
 }
 
 - (void)runReport {
+    NSUInteger weapons = ds_weapon_count();   // main thread: warms the table too
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         if (!gReady) ds_bootstrap();
         NSString *s = gReady
-            ? [NSString stringWithFormat:@"ready - pool 0x%llx - obj 0x%llx - ace %d/7",
-                                         (unsigned long long)0, (unsigned long long)gGenObjects, gAceHits]
+            ? [NSString stringWithFormat:@"ready - %lu weapons - ace %d/7",
+                                         (unsigned long)weapons, gAceHits]
             : gStatus;
         [self setStatusText:s];
     });
@@ -657,13 +814,14 @@ static unsigned long long ds_parse_id(NSString *s) {
 
 - (void)applyTapped {
     [self.field resignFirstResponder];
+    if (!self.field.text.length) [self syncField];   // picker selection wins
     int skinId = (int)ds_parse_id(self.field.text);
     [self setStatusText:@"applying..."];
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         if (!gReady) ds_bootstrap();
         if (!gReady) { [self setStatusText:gStatus]; return; }
         int n = ds_apply_all(skinId);
-        [self setStatusText:n > 0 ? [NSString stringWithFormat:@"applied %d to %d object(s)", skinId, n]
+        [self setStatusText:n > 0 ? [NSString stringWithFormat:@"applied 0x%08X to %d object(s)", skinId, n]
                                   : [NSString stringWithFormat:@"no target matched (code %d)", n]];
     });
 }
