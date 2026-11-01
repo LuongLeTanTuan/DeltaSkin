@@ -683,8 +683,7 @@ Danh sách dưới đây là cho **dylib** (menu + skin). Danh sách cho **app p
   | `DeltaSkin-tipa` | `DeltaSkin.tipa` 58 785 byte = `DeltaSkin.app` (`DeltaSkin.dylib` + `DeltaSkinPatcher` + `Info.plist`) | TrollStore, iOS 14 |
   | `DeltaSkin-dylib` | `DeltaSkin.dylib` 137 744 byte, arm64 | chèn vào IPA bằng eSign/Sideloadly |
 
-- Run đã kiểm tra: https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41261986446
-  (`DeltaSkin.dylib` nguyên bản: 0 hit cho `AnoSDK`, `SetSkin`, `ModularWeapon`, `jailbroken`,
+- Run đã kiểm tra: https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41261986446  (`DeltaSkin.dylib` nguyên bản: 0 hit cho `AnoSDK`, `SetSkin`, `ModularWeapon`, `jailbroken`,
   `DeltaForceClient`, `GNames/GObjects`, `UObject` **và** 0 hit cho tên súng/skin như `M4A1`,
   `Assault Rifle`, `Submachine`, `Sniper Rifle`).
 - Kích thước 87 KB → 137 KB vì có bảng **64 súng / 705 skin** nhúng (blob XOR 18 352 byte) cộng phần UI
@@ -693,6 +692,41 @@ Danh sách dưới đây là cho **dylib** (menu + skin). Danh sách cho **app p
   (`tools\dummy_main.c`, link với `-headerpad 0x800`), chạy `patcher_cli inject` trên đó, rồi
   `tools\verify_sig.py` băm lại từng page. Đây là thứ đã bắt được lỗi `page 0 mismatch` ở 6.2 — nếu chỉ
   biên dịch thì lỗi đó đi thẳng ra máy người dùng.
+
+### 8.1 Tipa thứ hai: đóng gói **chính game** (`tools/make_game_tipa.py`)
+
+`DeltaSkin.tipa` ở trên là app patcher, mang bundle id riêng `com.olltaterfx.deltaskin.patcher`, và nó sửa
+game tại chỗ trên máy. Muốn có một gói **cài đè lên game** (TrollStore nhận nó như bản cập nhật của
+`com.garena.game.df`, dylib nằm sẵn bên trong, không cần mở app patcher) thì dùng:
+
+```
+python tools/make_game_tipa.py --app D:\delta\Payload\DeltaForceClient.app ^
+    --dylib dist_5616d8a\dylib\DeltaSkin.dylib --out dist_5616d8a\DeltaForce-patched.tipa
+```
+
+Nó chỉ đổi đúng ba thứ trong payload, phần còn lại copy nguyên byte:
+
+| Thay đổi | Cách làm |
+|---|---|
+| `CFBundleIdentifier` | ép về `com.garena.game.df` (`--bundle-id`) để TrollStore coi đây là game, không phải app thứ hai |
+| executable | thêm **một** `LC_LOAD_DYLIB` = `@executable_path/Frameworks/DeltaSkin.dylib`, ghi lại bằng LIEF |
+| payload | thêm `Frameworks/DeltaSkin.dylib` |
+
+Script tự kiểm lại sau khi ghi: mở zip ra, assert bundle id đúng, assert có entry dylib, assert chuỗi
+`@executable_path/Frameworks/DeltaSkin.dylib` **nằm trong** executable đã ghi. Sai một trong ba là nó thoát
+khác 0 chứ không để lại file hỏng.
+
+Đã kiểm bản dựng thật (game 1.5 GB, tipa 1 208 404 791 byte):
+
+```
+cryptid  0          (binary đã giải mã, không phải bản FairPlay)
+arm64    123 libs   entry 0x10aab31f0
+dylib    có trong Frameworks/, sha256 trùng khít bản CI
+```
+
+Lưu ý: LIEF ghi lại file nên `LC_CODE_SIGNATURE` cũ trỏ quá EOF (bản gốc trong `delta.zip` cũng vậy —
+0x1830ab70 + 0x9d8b40 > kích thước file). TrollStore ký lại lúc cài nên chấp nhận được, nhưng đây là lý do
+**không** nên đẩy file này qua eSign/Sideloadly (chúng kiểm chữ ký trước khi ký lại).
 
 ---
 
