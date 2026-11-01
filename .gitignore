@@ -1,3 +1,6 @@
 build/
 *.dylib
 .DS_Store
+
+tipa_out/
+tipa_x/
