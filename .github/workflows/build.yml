@@ -49,3 +49,98 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build/DeltaSkin.dylib
+
+  patcher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld unzip curl zip python3
+
+      - name: Fetch iPhoneOS SDK
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
+          unzip -q /tmp/sdks.zip -d /tmp/sdks
+          echo "SDK=$(ls -d /tmp/sdks/sdks-master/iPhoneOS*.sdk | sort -V | tail -1)" >> $GITHUB_ENV
+
+      - name: Build dylib payload
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          clang -target arm64-apple-ios14.0 -isysroot "$SDK" \
+                -fobjc-arc -O2 -fuse-ld=lld -Wl,-x \
+                -framework Foundation -framework UIKit -framework CoreGraphics \
+                -dynamiclib -o build/DeltaSkin.dylib src/DeltaSkin.mm
+
+      # macho.c is plain C with its own Mach-O structs, so the exact code that
+      # signs on the device can be run and checked on the runner.
+      - name: Build host tool
+        run: |
+          set -euo pipefail
+          cc -O2 -Wall -Wextra -o build/patcher_cli \
+             tools/patcher_cli.c patcher/macho.c patcher/sha256.c
+
+      - name: Self-test inject + sign on a real arm64 Mach-O
+        run: |
+          set -euo pipefail
+          clang -target arm64-apple-ios14.0 -isysroot "$SDK" -fuse-ld=lld \
+                -Wl,-headerpad,0x800 -o build/probe tools/dummy_main.c
+          cp build/probe build/probe.orig
+
+          ./build/patcher_cli inject build/probe \
+              "@executable_path/Frameworks/DeltaSkin.dylib" patcher/entitlements.plist
+          python3 tools/verify_sig.py build/probe \
+              "@executable_path/Frameworks/DeltaSkin.dylib"
+
+          echo "== second inject must be refused =="
+          if ./build/patcher_cli inject build/probe \
+                "@executable_path/Frameworks/DeltaSkin.dylib" patcher/entitlements.plist; then
+            echo "second inject was not refused"; exit 1
+          fi
+
+          echo "== sign only =="
+          cp build/probe.orig build/probe2
+          ./build/patcher_cli sign build/probe2 patcher/entitlements.plist
+          python3 tools/verify_sig.py build/probe2
+
+          echo "== entitlements survive a round trip =="
+          ./build/patcher_cli ents build/probe2 > build/ents.xml
+          head -c 200 build/ents.xml; echo
+
+      - name: Build patcher app
+        run: |
+          set -euo pipefail
+          mkdir -p build/DeltaSkin.app
+          clang -target arm64-apple-ios14.0 -isysroot "$SDK" -fobjc-arc -O2 -fuse-ld=lld \
+                -Wl,-x -Wl,-headerpad,0x800 \
+                -framework UIKit -framework Foundation \
+                -o build/DeltaSkin.app/DeltaSkinPatcher \
+                patcher/main.m patcher/macho.c patcher/sha256.c
+          cp patcher/Info.plist build/DeltaSkin.app/
+          cp build/DeltaSkin.dylib build/DeltaSkin.app/
+          ./build/patcher_cli sign build/DeltaSkin.app/DeltaSkinPatcher patcher/entitlements.plist
+          python3 tools/verify_sig.py build/DeltaSkin.app/DeltaSkinPatcher
+          ls -l build/DeltaSkin.app
+
+      - name: Package tipa
+        run: |
+          set -euo pipefail
+          rm -rf build/package && mkdir -p build/package/Payload
+          cp -R build/DeltaSkin.app build/package/Payload/
+          ( cd build/package && zip -qry ../DeltaSkin.tipa Payload )
+          ls -l build/DeltaSkin.tipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeltaSkin-tipa
+          path: build/DeltaSkin.tipa
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/DeltaSkin.tipa
