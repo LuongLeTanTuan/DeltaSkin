@@ -371,21 +371,25 @@ static int sign_buffer(uint8_t **bufp, size_t *len, size_t *cap, layout *L,
     }
     if (need > *len) memset(buf + *len, 0, need - *len);
 
-    build_signature(buf + sigOff, buf, sigOff, ident,
-                    execBase, execLimit, execFlags, ent, entLen, cms, cmsLen, &S);
-
     uint64_t end = (uint64_t)sigOff + S.total;
-    if (end > *len) *len = (size_t)end;      /* file grows, tail already zeroed */
 
+    /* Every header field has to be final before the page hashes are taken:
+     * LC_CODE_SIGNATURE and __LINKEDIT both live in page 0, so writing them
+     * after build_signature leaves the first page hash describing bytes that no
+     * longer exist -- which is exactly how the first version of this failed. */
     L->sig->dataoff = sigOff;
     L->sig->datasize = S.total;
 
-    /* __LINKEDIT must physically cover the blob, not just the old data. */
     uint64_t segEnd = L->linkedit->fileoff + L->linkedit->filesize;
     if (end > segEnd) {
         L->linkedit->filesize = end - L->linkedit->fileoff;
         L->linkedit->vmsize = align_up64(L->linkedit->filesize, 1u << PAGE_SHIFT);
     }
+
+    if (end > *len) *len = (size_t)end;      /* file grows, tail already zeroed */
+
+    build_signature(buf + sigOff, buf, sigOff, ident,
+                    execBase, execLimit, execFlags, ent, entLen, cms, cmsLen, &S);
     return 0;
 }
 
