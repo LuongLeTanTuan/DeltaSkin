@@ -72,6 +72,12 @@ DSSTR(kFnSetSkinES, 0x41,
       0x12, 0x24, 0x35, 0x12, 0x2A, 0x28, 0x2F, 0x1E, 0x04, 0x12)
 DSSTR(kHostImage, 0x13,
       0x57, 0x76, 0x7F, 0x67, 0x72, 0x55, 0x7C, 0x61, 0x70, 0x76, 0x50, 0x7F, 0x7A, 0x76, 0x7D, 0x67)
+// Bundle id of the game. The host image is the main executable when the dylib is
+// injected into the app, and a re-signed IPA can rename that executable -- the
+// vendor menu and every clone so far keyed on the file name and went blind the
+// moment it changed. The bundle id survives re-signing.
+DSSTR(kHostBundle, 0x5A,
+      0x39, 0x35, 0x37, 0x74, 0x3D, 0x3B, 0x28, 0x3F, 0x34, 0x3B, 0x74, 0x3D, 0x3B, 0x37, 0x3F, 0x74, 0x3E, 0x3C)
 
 // ACE export names stay encoded too: a dylib carrying "AnoSDK..." in plain
 // sight is the easiest thing in the world for ACE to find in the image list.
@@ -248,8 +254,44 @@ static void ds_collect_ranges(void) {
 }
 
 // --------------------------------------------------------------- host image
+// Pulls the __DATA segments out of one dyld image and adopts it as the host.
+static BOOL ds_host_from_image(uint32_t i) {
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
+    if (!mh || mh->magic != MH_MAGIC_64) return NO;
+
+    gHostHeader = (uint64_t)mh;
+    gHostSlide = _dyld_get_image_vmaddr_slide(i);
+
+    uint64_t p = (uint64_t)mh + sizeof(struct mach_header_64);
+    for (uint32_t c = 0; c < mh->ncmds && gHostDataCount < 8; c++) {
+        const struct load_command *lc = (const struct load_command *)p;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strncmp(seg->segname, "__DATA", 6) == 0) {
+                gHostData[gHostDataCount].lo = seg->vmaddr + gHostSlide;
+                gHostData[gHostDataCount].hi = gHostData[gHostDataCount].lo + seg->vmsize;
+                gHostDataCount++;
+            }
+        }
+        if (lc->cmdsize < 8) break;   // corrupted table -> stop, no guesses
+        p += lc->cmdsize;
+    }
+    return YES;
+}
+
 static void ds_locate_host(void) {
     if (gHostHeader) return;
+
+    // Injected into the game: the host is the main executable, and the bundle id
+    // is the stable way to say so. Image 0 is always the main executable.
+    NSString *bid = [NSBundle mainBundle].bundleIdentifier;
+    if ([bid isEqualToString:kHostBundle()] && ds_host_from_image(0)) {
+        NSLog(@"[DeltaSkin] host=0x%llx data segs=%d (main exec, %@)",
+              gHostHeader, gHostDataCount, bid);
+        return;
+    }
+
+    // Otherwise (dylib loaded into some other process) fall back to the name.
     NSString *want = kHostImage();
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
@@ -258,27 +300,7 @@ static void ds_locate_host(void) {
         const char *base = strrchr(nm, '/');
         base = base ? base + 1 : nm;
         if (strcmp(base, want.UTF8String) != 0) continue;
-
-        const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
-        if (!mh || mh->magic != MH_MAGIC_64) continue;
-
-        gHostHeader = (uint64_t)mh;
-        gHostSlide = _dyld_get_image_vmaddr_slide(i);
-
-        uint64_t p = (uint64_t)mh + sizeof(struct mach_header_64);
-        for (uint32_t c = 0; c < mh->ncmds && gHostDataCount < 8; c++) {
-            const struct load_command *lc = (const struct load_command *)p;
-            if (lc->cmd == LC_SEGMENT_64) {
-                const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
-                if (strncmp(seg->segname, "__DATA", 6) == 0) {
-                    gHostData[gHostDataCount].lo = seg->vmaddr + gHostSlide;
-                    gHostData[gHostDataCount].hi = gHostData[gHostDataCount].lo + seg->vmsize;
-                    gHostDataCount++;
-                }
-            }
-            if (lc->cmdsize < 8) break;   // corrupted table -> stop, no guesses
-            p += lc->cmdsize;
-        }
+        if (!ds_host_from_image(i)) continue;
         break;
     }
     NSLog(@"[DeltaSkin] host=0x%llx data segs=%d", gHostHeader, gHostDataCount);

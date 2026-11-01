@@ -82,6 +82,14 @@ duyệt load_command: LC_SEGMENT_64, segname bắt đầu bằng "__DATA" -> lư
                      segname bắt đầu bằng "__TEXT" -> lưu tối đa 4 vùng (để validate con trỏ hàm)
 ```
 
+Menu gốc khớp theo **tên file** — trong `PxMenu.dylib` có đúng 1 chuỗi `DeltaForceClient` và **0** chuỗi
+`com.garena.game.df`. Bản clone giữ nguyên cách đó, và đó là một chỗ giòn: IPA ký lại có thể đổi tên file
+thực thi, lúc đó mod im lặng không tìm thấy host.
+
+Bản clone nay đổi thứ tự (mục 3.12): khi bundle id của tiến trình là `com.garena.game.df` thì host chính là
+**image 0** (main executable, luôn luôn như vậy), không cần so tên. Khớp tên chỉ còn là đường dự phòng cho
+trường hợp dylib bị nạp vào tiến trình khác.
+
 ### 3.3 Tìm GNames
 Quét từng 8 byte trong các vùng `__DATA`, tìm con trỏ `p` sao cho:
 
@@ -288,6 +296,28 @@ Vì vậy bước tiếp theo là **lấy mẫu byte thật**, không đoán:
 Chạy một lần trên máy, gửi lại các dòng `[DeltaSkin] POOL`, rồi suy ra hàm giải mã và thay vào
 `ds_name_entry()`. Không có bước này thì mọi thứ còn lại — bảng 705 id, thứ hạng setter, UI — đều đúng mà
 vẫn không chạy, vì cả ba đều tra tên.
+
+### 3.12 Định danh game bằng bundle id
+
+Ground truth trong chính app đang patch (`Payload/DeltaForceClient.app/Info.plist`):
+
+| Khóa | Giá trị |
+|---|---|
+| `CFBundleIdentifier` | `com.garena.game.df` |
+| `CFBundleExecutable` | `DeltaForceClient` |
+| `CFBundleName` | `GarenaDeltaForce` |
+
+Ba chỗ dùng nó, và một chỗ **không** nên dùng:
+
+| Nơi | Dùng gì | Vì sao |
+|---|---|---|
+| `patcher/main.m:46` `kGameBundleID` | `com.garena.game.df` | app patcher phải chọn đúng app trong `/Applications`, so bundle id trước rồi mới tới tên exe |
+| dylib, `ds_locate_host()` | `com.garena.game.df` → host là **image 0** | dylib được chèn vào chính game, nên main executable luôn là host; khớp bundle id không bị ảnh hưởng khi IPA bị ký lại / đổi tên exe |
+| dylib, đường dự phòng | tên `DeltaForceClient` | chỉ còn dùng khi dylib bị nạp vào tiến trình khác (ví dụ app patcher) |
+| `kHostImage` cũ (đường chính) | tên file | **giòn**: đổi tên exe là mod im lặng. Menu gốc cũng làm y vậy — `PxMenu.dylib` có 1 chuỗi `DeltaForceClient`, 0 chuỗi bundle id |
+
+Chuỗi bundle id trong dylib vẫn để dạng XOR (`kHostBundle`, key `0x5A`) như các định danh engine khác, để
+không có `com.garena.game.df` nằm trần trong `__cstring` cho ACE quét.
 
 ---
 
