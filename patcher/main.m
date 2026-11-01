@@ -40,6 +40,10 @@ static void UISetStatus(NSString *s) {
 // --------------------------------------------------------------- game lookup
 static NSString *const kDylibName = @"DeltaSkin.dylib";
 static NSString *const kInstallPath = @"@executable_path/Frameworks/DeltaSkin.dylib";
+// The identity the patcher is built for. Matched first, because the executable
+// name and the bundle id of a sideloaded build can both be changed by whoever
+// repackaged it, while this is what the store build actually ships.
+static NSString *const kGameBundleID = @"com.garena.game.df";
 
 static BOOL DSIsGameApp(NSString *appPath) {
     NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:
@@ -47,6 +51,7 @@ static BOOL DSIsGameApp(NSString *appPath) {
     if (!info) return NO;
     NSString *exe = info[@"CFBundleExecutable"] ?: @"";
     NSString *bid = [(info[@"CFBundleIdentifier"] ?: @"") lowercaseString];
+    if ([bid isEqualToString:kGameBundleID]) return YES;
     if ([exe isEqualToString:@"DeltaForceClient"]) return YES;
     if ([bid containsString:@"deltaforce"]) return YES;
     if ([bid containsString:@"deltawar"]) return YES;

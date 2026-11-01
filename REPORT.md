@@ -488,7 +488,10 @@ thiết bị iOS trong phiên này. Xem 6.5.
 ### 6.4 Patch làm gì, theo đúng thứ tự
 
 1. Tìm app: quét `/var/Containers/Bundle/Application/*` (và `/private/var/...`), xác nhận bằng
-   `CFBundleIdentifier` hoặc tên file thực thi `DeltaForceClient`. Không đoán theo đường dẫn cứng.
+   `CFBundleIdentifier = com.garena.game.df` (khớp chính xác, so trước), rồi mới tới `CFBundleExecutable =
+   DeltaForceClient` và các biến thể `*deltaforce*` / `*deltawar*`. Không đoán theo đường dẫn cứng.
+   - Đối chiếu bản build đang có: bundle id `com.garena.game.df`, exe `DeltaForceClient`, tên hiển thị
+     `Garena Delta Force`, version `1.203.37117`, `MinimumOSVersion 10.0`.
 2. Backup **một lần**: `DeltaForceClient` (file thực thi) + `Info.plist` → `Documents/backup/<bundle-id>/`
    của app DeltaSkin. Các lần Patch sau dùng lại bản gốc đó, không ghi đè — nên Patch hai lần vẫn Restore
    về đúng bản gốc đầu tiên.

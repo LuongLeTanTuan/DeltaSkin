@@ -56,6 +56,8 @@ game rồi thôi.
 2. Mở TrollStore → dấu `+` → chọn `DeltaSkin.tipa` → **Install**.
 3. Mở app **DeltaSkin** vừa cài. Dòng trạng thái phải hiện đường dẫn app game, ví dụ
    `/var/Containers/Bundle/Application/<UUID>/DeltaForceClient.app` và `state: untouched`.
+   - App tìm game theo `CFBundleIdentifier = com.garena.game.df` trước, rồi mới tới tên file thực thi
+     `DeltaForceClient`.
    - Nếu hiện `game not found`: game chưa cài, hoặc bản game nằm ở đường dẫn lạ.
 4. Bấm **Patch**. Log sẽ chạy: `backup written` → `payload copied` → `done`.
 5. Mở game. Sau ~2 giây thấy nút tròn **DS** ở **mép phải màn hình, khoảng 1/3 chiều cao** — kéo được.
