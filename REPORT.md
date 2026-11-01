@@ -246,6 +246,49 @@ Vẫn còn một khoảng cách chưa vá: menu gốc leo thang bốn bước �
 `…FuncComponentAppearance` → "all components"; bản clone **chỉ** gọi descriptor. Đó là lý do có khẩu skin
 không hiện. Chưa sửa vì chưa có máy để thử.
 
+### 3.11 Chặn hiện tại: bảng FName bị mã hoá trên build 1.203.37117
+
+Đây là lý do bản clone báo `pool not found`, và nó không phải lỗi của bảng skin.
+
+Cách dò cũ (`ds_find_gnames`) tìm con trỏ trỏ tới **4 byte `08 00 4E 6F`** — header `len=4` của `None` cộng
+hai ký tự `"No"`. Trên build này header vẫn đúng, nhưng **ký tự thì không còn là plaintext**:
+
+```
+log thiết bị (D:\delta\assetdb.log:38), do chính menu gốc in ra:
+  crypted=1 fb=0 name0='Nênö'
+  GObjects ... count=0x1881E
+  layout calibration failed ... score=0
+```
+
+Đọc được ba điều từ đúng ba con số đó:
+
+1. `name0='Nênö'` **dài 4 ký tự** → địa chỉ pool đúng, header (`len=4`) vẫn plaintext, chỉ phần ký tự bị
+   biến đổi. Nếu tìm sai chỗ thì `len` đã là rác.
+2. `crypted=1` → menu gốc **có** nhánh xử lý riêng cho trường hợp này, tức tác giả đã biết và đã giải.
+3. `calibration failed ... score=0` → menu gốc **cũng thất bại** trên build này. Nó không hỏng vì bị clone
+   chen vào; nó hỏng sẵn. Nghĩa là không thể lấy menu gốc làm chuẩn để đối chiếu.
+4. `GNames=0x11D005040`, `pool=+0xC8` → pool **không** nằm trong `__DATA` của host như bản cũ giả định, mà
+   treo sau một object trên heap. Đây là lý do thứ hai khiến pass quét `__DATA` trượt.
+
+Bản `PxMenu.dylib` đã sinh ra log đó **không có trên máy**: hai bản trong `D:\delta\Payload` và
+`D:\dfgpt\DeltaForceClient.app` là cùng một file (sha256 `3FF88B18…EB8CBD`), chuỗi khởi tạo của chúng là
+`"=== PxMenu constructor, %u dyld images ==="`, còn log ghi `"=== PxMenu build 62c83b0 entry via load, 751
+dyld images ==="`. Trong file đang có, `crypted` và `statics: GNames` đều **0 hit**. Nên không có bản tham
+chiếu nào để đọc lại thuật toán giải mã.
+
+Vì vậy bước tiếp theo là **lấy mẫu byte thật**, không đoán:
+
+- `ds_find_gnames_struct()` — tìm pool chỉ bằng header, không đọc một byte ký tự nào. Pass A quét `__DATA`
+  của host như cũ; pass B xử lý trường hợp pool treo sau heap object (đúng như log), quét 0x400 byte đầu
+  của từng object ứng viên.
+- `ds_dump_pool()` — in hex 0x800 byte đầu của block 0 và 0x200 byte đầu của block 1..3 ra `NSLog`, mỗi
+  dòng 64 byte. 0x800 byte đầu block 0 là đúng tập tên đã biết plaintext (`None`, `Object`, `Class`,
+  `Package`, `IntProperty`…), đủ để giải ra phép biến đổi.
+
+Chạy một lần trên máy, gửi lại các dòng `[DeltaSkin] POOL`, rồi suy ra hàm giải mã và thay vào
+`ds_name_entry()`. Không có bước này thì mọi thứ còn lại — bảng 705 id, thứ hạng setter, UI — đều đúng mà
+vẫn không chạy, vì cả ba đều tra tên.
+
 ---
 
 ## 4. Né anti-cheat: cái gì thật, cái gì không
@@ -628,8 +671,9 @@ Danh sách dưới đây là cho **dylib** (menu + skin). Danh sách cho **app p
 1. **iOS 14 + TrollStore:** cài `DeltaSkin.tipa` → mở app → xác nhận nó tìm ra game → **Patch** → mở game.
    Nếu game không mở được: mở lại app → **Restore original**. Đây là phép thử cho toàn bộ mục 6.
 2. **iOS 18 no-JB:** tải `DeltaSkin.dylib`, chèn vào IPA bằng eSign, cài.
-3. Mở game, bấm nút **DS** → xem dòng `runtime`. Nếu `GNames not found` / `GObjects not found` thì bản
-   build game đã đổi layout → gửi log (Xcode/Console: `[DeltaSkin]`) để chỉnh magic/scan.
+3. Mở game, bấm nút **DS** → xem dòng `runtime`. Nếu `pool not found` thì đã có bản dò mới (mục 3.11): nó
+   tự in `[DeltaSkin] POOL ...` ra log thay vì im lặng thất bại — gửi các dòng đó. Nếu dòng trạng thái là
+   `pool encrypted - dump logged` thì đúng là build đang mã hoá FName và đang chờ mẫu byte này.
 4. Chọn súng ở cột trái → chọn skin ở cột phải → **Apply Skin**. Nếu trả `Nothing applied (code -4)` nghĩa
    là tên setter không khớp → cần dump thêm danh sách UFunction của 3 lớp đó (script IDA đã có trong
    `D:\dfgpt\work\dump_ida.py`). Nếu apply ra **sai skin** thì lỗi nằm ở bảng `SkinTable.h`, không ở UI —

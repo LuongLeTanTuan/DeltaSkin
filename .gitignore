@@ -4,3 +4,4 @@ build/
 
 tipa_out/
 tipa_x/
+dist_*/

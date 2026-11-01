@@ -347,6 +347,120 @@ static BOOL ds_find_gnames(void) {
     return NO;
 }
 
+// --------------------------------------------------------------- pool dump
+// This build transforms the character bytes inside the FName pool. The header
+// of index 0 still reads as "4 chars, narrow", so the pool is right where it
+// always was, but nothing after the header decodes to ASCII and every
+// name-based lookup in this file fails on it. The vendor menu fails on this
+// build too (device log: "crypted=1", "layout calibration failed ... score=0"),
+// so there is no reference decoder to copy. One run on device writes the raw
+// bytes to the log; the transform is then derived offline from entries whose
+// plaintext is already known ("None", "Object", "Class", "Package", ...).
+
+enum { DS_POOL_BLOCK = 0x10000 };
+
+// Counts the consecutive entries a block yields when only the plaintext header
+// is trusted. A real pool block walks hundreds of entries before it stops; a
+// random pointer that happens to look like a header stops after one or two.
+static int ds_block_score(uint64_t base) {
+    if (!base || (base & 1)) return 0;
+    int off = 0, n = 0;
+    while (off < DS_POOL_BLOCK - 2 && ds_is_mapped(base + off, 2)) {
+        uint16_t hdr = *(uint16_t *)(base + off);
+        int len = hdr >> 1;
+        if (len == 0 || len > 512) break;
+        int step = 2 + ((hdr & 1) ? len * 2 : len);
+        if (step & 1) step++;                   // entries stay 2-byte aligned
+        if (off + step > DS_POOL_BLOCK) break;
+        off += step;
+        n++;
+    }
+    return n;
+}
+
+// Validates one candidate blocks-array address and installs it when the first
+// block walks. Returns YES only on a real pool.
+static BOOL ds_try_blocks(uint64_t arr) {
+    if (!arr || (arr & 7) || !ds_is_mapped(arr, 32)) return NO;
+    uint64_t b0 = *(uint64_t *)arr;
+    if (!b0 || (b0 & 1) || !ds_is_mapped(b0, 8)) return NO;
+    if (*(uint16_t *)b0 != 8) return NO;      // index 0 is "None": 4 narrow chars
+    int s0 = ds_block_score(b0);
+    if (s0 < 32) return NO;
+
+    uint64_t blocks[4] = { b0, 0, 0, 0 };
+    int scores[4] = { s0, 0, 0, 0 };
+    for (int i = 1; i < 4; i++) {
+        uint64_t e = *(uint64_t *)(arr + 8 * i);
+        if (!e) break;
+        scores[i] = ds_block_score(e);
+        if (scores[i] < 8) break;
+        blocks[i] = e;
+    }
+    memcpy(gNameBlocks, blocks, sizeof(blocks));
+    NSLog(@"[DeltaSkin] pool(struct) arr=0x%llx scores=%d/%d/%d/%d",
+          arr, scores[0], scores[1], scores[2], scores[3]);
+    return YES;
+}
+
+// Same job as ds_find_gnames() but never looks at a character byte, so it still
+// works when the characters are encrypted.
+static BOOL ds_find_gnames_struct(void) {
+    if (gNameBlocks[0]) return YES;
+    if (!gHostHeader) return NO;
+
+    // Pass A: the blocks array is a static global, so its address sits in the
+    // host's own __DATA.
+    for (int seg = 0; seg < gHostDataCount; seg++) {
+        uint64_t lo = gHostData[seg].lo, hi = gHostData[seg].hi;
+        if (!ds_is_mapped(lo, hi - lo)) continue;
+        for (uint64_t p = lo; p + 8 <= hi; p += 8)
+            if (ds_try_blocks(*(uint64_t *)p)) return YES;
+    }
+
+    // Pass B: on this build the pool hangs off a heap object (the vendor menu
+    // reads it as GNames + 0xC8), so the static global is that object and the
+    // array pointer lives inside it. Bounded: UE globals sit early in __DATA.
+    int tried = 0;
+    for (int seg = 0; seg < gHostDataCount; seg++) {
+        uint64_t lo = gHostData[seg].lo, hi = gHostData[seg].hi;
+        if (!ds_is_mapped(lo, hi - lo)) continue;
+        for (uint64_t p = lo; p + 8 <= hi; p += 8) {
+            uint64_t v = *(uint64_t *)p;
+            if (!v || (v & 7) || !ds_is_mapped(v, 0x400)) continue;
+            if (++tried > 32768) return NO;
+            for (uint64_t off = 0; off < 0x400; off += 8)
+                if (ds_try_blocks(*(uint64_t *)(v + off))) return YES;
+        }
+    }
+    return NO;
+}
+
+// 64 bytes per line: short enough for any log channel to keep whole.
+static void ds_dump_hex(uint64_t base, size_t len, const char *tag) {
+    if (!base || !len) return;
+    if (!ds_is_mapped(base, len)) {
+        NSLog(@"[DeltaSkin] POOL %s @0x%llx unmapped", tag, base);
+        return;
+    }
+    const uint8_t *p = (const uint8_t *)base;
+    for (size_t off = 0; off < len; off += 64) {
+        size_t n = (len - off < 64) ? (len - off) : 64;
+        NSMutableString *line = [NSMutableString stringWithCapacity:160];
+        for (size_t i = 0; i < n; i++) [line appendFormat:@"%02x", p[off + i]];
+        NSLog(@"[DeltaSkin] POOL %s +%04lx %@", tag, (unsigned long)off, line);
+    }
+}
+
+// Block 0 index 0..~600 is the engine core vocabulary, which is exactly the set
+// of names whose plaintext is known, so 2KB there is enough to solve the
+// transform. The other blocks get a taste so an index-dependent cipher (rather
+// than a per-character one) shows up immediately.
+static void ds_dump_pool(void) {
+    ds_dump_hex(gNameBlocks[0], 0x800, "b0");
+    for (int i = 1; i < 4; i++) ds_dump_hex(gNameBlocks[i], 0x200, i == 1 ? "b1" : (i == 2 ? "b2" : "b3"));
+}
+
 // FName (int32 index, int32 number) -> text
 static BOOL ds_fname_text(uint64_t pooledIndex, char *out, size_t cap) {
     if (!gNameBlocks[0]) return NO;
@@ -591,7 +705,17 @@ static void ds_bootstrap(void) {
     gStatus = @"scanning";
     ds_collect_ranges();
     ds_locate_host();
-    if (!ds_find_gnames()) { gStatus = @"pool not found"; return; }
+    if (!ds_find_gnames()) {
+        // Names are encrypted on this build: find the pool by structure and
+        // log the raw bytes so the decoder can be derived offline.
+        if (ds_find_gnames_struct()) {
+            ds_dump_pool();
+            gStatus = @"pool encrypted - dump logged";
+        } else {
+            gStatus = @"pool not found";
+        }
+        return;
+    }
     if (!ds_find_gobjects()) { gStatus = @"objects not found"; return; }
     gReady = YES;
     gStatus = @"ready";
