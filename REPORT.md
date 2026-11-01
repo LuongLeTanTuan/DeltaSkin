@@ -158,9 +158,41 @@ Ba hàm dùng bảng này:
 - `sub_7BA4` — đọc `skin_gun_id`, `strtoul(...,0,0)`, gọi `-[PxUE4 applySkin:]`, map mã trả về ra
   câu thông báo "applied via …".
 
-Bản clone nhúng nguyên bảng này vào `src/SkinTable.h` dưới dạng blob XOR `0x5A` (85 tên súng +
-705 dòng), decode lúc chạy bằng đúng hàm `noinline` đã dùng cho các chuỗi khác — nên không có tên
-súng/skin nào nằm plaintext trong binary.
+Bản clone đầu tiên nhúng nguyên bảng này vào `src/SkinTable.h` dưới dạng blob XOR `0x5A` (85 tên súng +
+705 dòng). Bảng đó đã bị thay — lý do ở 3.9.
+
+### 3.9 Phải lấy lại bảng từ `PxExtFFi` (78 súng / 707 skin) — vì sao bảng cũ lệch
+
+Bảng ở 3.8 đọc **đúng** nhưng **chia nhóm sai**, và đó chính là triệu chứng "danh sách skin bị lệch,
+bấm ô này ra ô khác".
+
+`sub_77A8` nhóm theo `weaponId` (int32) trong bảng. Nhưng trong bảng của `PxMenu.dylib`, 22 trong 85
+`weaponId` thực chất là **id riêng của một skin** — tên súng tương ứng đọc ra là
+`ASh-12 Battle Rifle-Goose Goose Duck`, `KC17 Assault Rifle-SAW`… Tức cột trái hiện một *skin* như thể nó
+là một *khẩu súng*, và bấm vào đó thì cột phải chỉ có đúng một dòng. Các dòng thật của khẩu đó vẫn nằm ở
+nhóm gốc, nên danh sách vừa thiếu vừa lệch — lỗi dữ liệu, không phải lỗi vẽ.
+
+`PxExtFFi` (framework UI của chính menu bên bán) lưu mỗi skin kèm **cả** id **và** chuỗi hiển thị đầy đủ
+`"Súng - Skin"`:
+
+| Địa chỉ | Nội dung |
+|---|---|
+| `0x1CF05A8` | mảng con trỏ dòng |
+| `0x1CF46A0` | 707 dòng cùng cấu trúc |
+
+Vì mỗi chuỗi đã chứa cả hai nửa, việc chia nhóm suy ra từ chính chuỗi của nhà bán, không phải đoán theo
+`weaponId`. Kiểm tra lại trên blob đã nhúng (`tools\check_groups.py`):
+
+- 78 nhóm, 707 dòng, **707 id khác nhau**
+- 0 nhóm rỗng
+- 0 cặp tên súng mà tên này là tiền tố của tên kia (bẫy khi tách theo dấu `-`)
+- 0 id trùng giữa hai khẩu
+- decode tiêu tốn đúng **18 620/18 620 byte** — không thiếu, không thừa, nên không dòng nào bị bỏ âm thầm
+
+Định dạng blob trong `src/SkinTable.h`: 78 tên súng length-prefixed, rồi 707 dòng
+`{ u8 weaponIndex, u32 skinId, u8 nameLen, name }`, XOR `0x5A` (rồi XOR thêm `gMaskSalt`). `ds_load_table()`
+chỉ đọc — nó **không** suy luận nhóm lúc chạy, nên không còn đường nào để UI lệch khỏi bảng: cặp
+(`weaponIdx`, `skinIdx`) là nguồn duy nhất, và `ds_skin_id()` tra trong đúng nhóm đó.
 
 ---
 
@@ -278,9 +310,15 @@ Cấu trúc:
 ```
 DeltaSkinMod\
   src\DeltaSkin.mm          toàn bộ logic (discovery + skin + UI + antiban), ObjC++ một file
+  src\SkinTable.h           bảng 78 súng / 707 skin, XOR 0x5A, 18620 byte
+  patcher\macho.c           đọc/sửa/ký lại Mach-O (struct riêng, không phụ thuộc SDK)
+  patcher\sha256.c          SHA-256 tự viết (CI chạy được trên Linux lẫn iOS)
+  patcher\main.m            app DeltaSkin: tìm game, backup, Patch, Restore
+  patcher\entitlements.plist  platform-application + no-sandbox
+  tools\patcher_cli.c       bản CLI của cùng engine, dùng trong CI
+  tools\verify_sig.py       verifier độc lập (đọc lại chữ ký, băm lại từng page)
   Makefile                  build bằng xcrun clang (macOS)
-  .github\workflows\build.yml   build tự động trên GitHub (macOS runner) + artifact
-  tools\inject_ipa.sh       chèn dylib vào IPA rồi ký lại (macOS)
+  .github\workflows\build.yml   build tự động trên GitHub (ubuntu) + 2 artifact
   README.md                 hướng dẫn cài trên 2 máy
   REPORT.md                 file này
 ```
@@ -297,7 +335,7 @@ Thiết kế clone (khớp hành vi gốc, bỏ hết phần thừa):
 | `sub_F318` tìm UClass theo tên | `ds_find_class()` |
 | `sub_F47C` tìm UFunction theo tên | `ds_find_function()` (lọc theo Outer = UClass) |
 | `sub_102C8` gọi setter | `ds_apply_skin()` (validate con trỏ trong `__TEXT`, param = int skinId) |
-| menu `PxMenuView` | `DSMenu` — nút nổi "DS" gắn vào window của game, panel trong window riêng, combo `UIAlertController` cho Súng → Skin (xem 5.1) |
+| menu `PxMenuView` | `DSMenu` — nút nổi "DS" gắn vào window của game, panel trong window riêng, **hai `UITableView` cạnh nhau** Súng → Skin (xem 5.1) |
 
 Khác biệt có chủ ý:
 - Không có ESP/aimbot/whatever khác.
@@ -317,16 +355,21 @@ Bản đầu của clone dùng `UISegmentedControl` + `UIPickerView`. Nó sai �
 2. **Picker không có nút xác nhận.** `valueChanged` bắn liên tục trong lúc cuộn, nên mỗi lần lướt qua
    một dòng là một lần đổi `skinIdx`, không có mốc "chốt".
 
-Cách chọn giờ clone nguyên từ `D:\delta\PxExtNoJB` (`Menu\PxMenuView.m` `comboTapped:`,
-`Menu\PxStore.m` `pxBuildSkinTab`):
+Cách chọn giờ clone từ `D:\delta\PxExtNoJB` (`Menu\PxMenuView.m`), nhưng đổi cấu trúc: bản gốc dùng hai
+combo bật ActionSheet, ở đây là **hai bảng cạnh nhau** — vì trên màn hình game, mở ActionSheet là mất luôn
+ngữ cảnh "đang chọn khẩu nào", còn hai cột thì thấy cả hai cùng lúc:
 
 | Gốc | Clone |
 |---|---|
-| `PxControlCombo` + `UIButton` 96×44 | `weaponCombo` / `skinCombo` (`UIButton`, `ds_row_button`) |
-| `comboTapped:` → `UIAlertController` ActionSheet, mỗi option một `UIAlertAction` | `presentOptions:title:handler:` — cùng cấu trúc, thêm `popoverPresentationController.sourceView` (thiếu là crash trên iPad) |
-| chọn súng → reset skin về index 0 | `weaponTapped` → `skinIdx = 0`, `field.text = @""`, `refresh` |
-| `PxStore` ghi `skin_weapon_idx` / `skin_select_idx` | giữ trong `DSMenu` (phiên chạy), không ghi file |
+| panel xếp dọc, chọn súng rồi mở bảng skin | `weaponTable` (trái) + `skinTable` (phải), hai `UITableView` cạnh nhau, hai data source riêng |
+| chọn súng → reset skin về index 0 | `tableView:didSelectRowAtIndexPath:` cột trái → `skinIdx = 0` + `[skinTable reloadData]` |
+| ô nhập ID tự do trong panel | **bỏ hẳn.** Nhãn `0x…` chỉ đọc, luôn lấy từ `ds_skin_id()` theo đúng cặp (khẩu, skin) đang chọn |
+| `comboTapped:` → `UIAlertController` ActionSheet | không dùng cho danh sách; ActionSheet chỉ còn cho xác nhận |
 | `PxToast` = `UIAlertController` Alert | `ds_toast()` — cùng cách, ưu tiên window của menu nếu đang mở |
+
+Bỏ ô nhập ID là fix cho đúng triệu chứng "chọn ô này ra id khác": trước đây ID đến từ ba nguồn (ô nhập,
+`skinIdx`, và dòng vừa bấm) và ba nguồn đó lệch nhau sau khi đổi súng. Giờ chỉ còn **một** nguồn: cặp
+(`weaponIdx`, `skinIdx`) đang được highlight, và ID được tra từ bảng theo cặp đó tại thời điểm bấm Apply.
 
 **Lỗi "mở menu rồi tắt thì màn hình ngoài không thao tác được"** — nguyên nhân nằm ở bản clone cũ, không
 phải ở game:
@@ -372,7 +415,118 @@ tiêu thụ ở `fabTapped`) — bản gốc `PxMenuView` dùng đúng cách nà
 
 ---
 
-## 6. Chưa xác minh (phải nói rõ)
+## 6. Đường iOS 14: app patcher (TIPA) và chuyện ký lại Mach-O
+
+Máy iOS 14 chạy TrollStore không có máy tính bên cạnh, nên không thể "chèn dylib vào IPA rồi ký bằng eSign".
+Cách duy nhất không cần PC: **một app thứ hai** được TrollStore cài, tự mở file thực thi của game ra sửa.
+Đó là toàn bộ lý do `patcher\` tồn tại — nó không phải bản mod của game, nó là cái tuốc-nơ-vít.
+
+### 6.1 Ground truth: chữ ký của chính game
+
+Mọi thứ trong `patcher\macho.c` được viết lại từ **chữ ký có thật** trong `DeltaForceClient`, không phải từ
+tài liệu (tài liệu Apple về `CodeDirectory` công khai nhưng thiếu đúng mấy chỗ cần thiết). Đọc trực tiếp:
+
+| Trường | Giá trị đo được |
+|---|---|
+| `LC_CODE_SIGNATURE` | `dataoff = 0x1830AB70`, `datasize = 0x9D8B40` (10 324 800) |
+| magic SuperBlob | `fa de 0c c0` — tức `0xfade0cc0` **big-endian** |
+| CodeDirectory | version `0x20400`, flags `0x0`, `hashOff 342`, `identOff 88`, `nSpecial 7`, `nCode 99083` |
+| `codeLimit` | `0x1830AB70` = đúng `dataoff` (byte đầu tiên **không** được băm) |
+| hash | SHA-256 (`hashType 2`), `pageShift` **12** → page 4 KiB |
+| identifier | `com.garena.game.df` |
+| execSeg | `execBase 0`, `execLimit 0x1380C000`, `execFlags 0x11` |
+| blob trong SuperBlob | `0` CD, `2` requirements, `5` entitlements (`fade7171`), `7` DER entitlements, `0x10000` CMS (`fade0b01`, 4428 byte) |
+
+Ba điều rút ra, cả ba đều là thứ mà một implementation "theo trí nhớ" sẽ làm sai:
+
+1. **Toàn bộ cấu trúc chữ ký nằm big-endian**, trong khi mọi trường khác của Mach-O là little-endian.
+   `macho.c` vì thế có `cd_put`/`cd_put64` ghi tay từng byte, không `memcpy` struct.
+2. **`pageShift` là 12, không phải 14.** Nhiều bài viết nói arm64 iOS dùng page 16 KiB; bản build này dùng
+   4 KiB. Sai chỗ này thì `nCode` lệch 4 lần và mọi hash đều sai — mà lại *không* báo lỗi rõ ràng, chỉ là
+   app không mở.
+3. `execLimit` = `0x1380C000` = `__TEXT` `filesize`, và `execBase` = `0` = `fileoff`. Không phải `vmaddr`
+   (`0x100000000` không nhét vừa `uint32`). Đây là chỗ dễ sai thứ ba.
+
+### 6.2 Sáu lỗi đã gặp thật, và cách sửa
+
+Ghi lại vì mỗi lỗi đều tốn một vòng CI:
+
+| Triệu chứng | Nguyên nhân | Sửa |
+|---|---|---|
+| verifier báo `bad SuperBlob magic` | ghi little-endian | `cd_put` ghi tay big-endian |
+| `page 0 mismatch` (chỉ page 0) | `LC_CODE_SIGNATURE` + `__LINKEDIT` được ghi **sau** khi băm page | ghi hết header trước, băm sau |
+| `signature does not fit in the reserved headroom` | đo kích thước bằng "2 page + 0x4000" — file 400 MB cần ~800 KB riêng cho bảng hash (24 700 slot) | `sig_measure()` đo đúng một lần, dùng lại |
+| entitlements đọc ra rỗng | ghi XML trần, không có header blob | đóng gói `0xfade7171` + len + XML |
+| `execSegLimit` sai | lấy `vmsize` của `__TEXT` | lấy `fileoff`/`filesize` |
+| tốn 800 MB RAM | `read_file` rồi `realloc` — copy cả file 400 MB hai lần | một `calloc(n + 4 MB)`, tail là zero page của kernel |
+
+Sửa cuối là bắt buộc trên máy thật: iOS 14.8.1 trên máy 3 GB RAM sẽ bị jetsam giết trước khi patch xong nếu
+copy file hai lần.
+
+### 6.3 Chiến lược ký: ad-hoc + mang theo CMS cũ
+
+`patcher` **không** ký bằng chứng chỉ (không có, và TrollStore không cần). Nó làm đúng hai việc:
+
+- CodeDirectory mới: `flags = 0` khi có CMS (không đặt `CS_ADHOC`, vì blob đã có chữ ký thật),
+  `flags = 2` (`CS_ADHOC`) khi file không có CMS. `execFlags = MAIN_BINARY | ALLOW_UNSIGNED`.
+- Blob `0x10000` (CMS) của chữ ký **cũ được chép nguyên byte** sang chữ ký mới. Không băm lại, không kiểm
+  tra — CodeDirectory ở trên mới là thứ quyết định hash từng page.
+
+Lý do: trên iOS 14, đường mà TrollStore đi qua là CoreTrust. CoreTrust không chấp nhận một CodeDirectory
+ad-hoc trần cho app đã cài; nó chấp nhận app mà nó đã "tin" từ trước. Giữ CMS cũ không làm chữ ký *đúng*
+hơn, nhưng giữ app ở đúng trạng thái nó đang ở trước khi patch, thay vì tệ hơn.
+
+Cái **đã chứng minh** (chạy được, có log): `tools\verify_sig.py` là verifier viết độc lập, không dùng code
+của patcher — nó đọc lại `LC_CODE_SIGNATURE`, parse SuperBlob, băm lại từng page từ đĩa và so với slot.
+Trên `DeltaSkinPatcher` trong TIPA: `OK 22/22 page hashes verified`, entitlements 685 byte, slot `-1` khớp.
+Cùng verifier đó chạy trên chữ ký gốc của game để đối chiếu (nếu nó báo sai chữ ký của Apple thì verifier
+sai, không phải patcher sai).
+
+Cái **chưa chứng minh**: CoreTrust/TrollStore trên máy thật có chấp nhận bản đã ký lại hay không. Không có
+thiết bị iOS trong phiên này. Xem 6.5.
+
+### 6.4 Patch làm gì, theo đúng thứ tự
+
+1. Tìm app: quét `/var/Containers/Bundle/Application/*` (và `/private/var/...`), xác nhận bằng
+   `CFBundleIdentifier` hoặc tên file thực thi `DeltaForceClient`. Không đoán theo đường dẫn cứng.
+2. Backup **một lần**: `DeltaForceClient` (file thực thi) + `Info.plist` → `Documents/backup/<bundle-id>/`
+   của app DeltaSkin. Các lần Patch sau dùng lại bản gốc đó, không ghi đè — nên Patch hai lần vẫn Restore
+   về đúng bản gốc đầu tiên.
+3. Chép `DeltaSkin.dylib` (nằm sẵn trong app) vào `DeltaForceClient.app/Frameworks/`.
+4. Chèn `LC_LOAD_DYLIB` = `@executable_path/Frameworks/DeltaSkin.dylib` vào header, rồi ký lại tại chỗ.
+
+Bước 4 có ba cái chặn, tất cả đều **fail closed** (báo lỗi, không ghi gì):
+- Không đủ chỗ trong header cho load command → `no header room for LC_LOAD_DYLIB`. Header game có
+  `0x768` byte đệm (padding giữa load commands và `__TEXT,__text` ở `0x4000`) nên thực tế là đủ.
+- Dylib đã có trong danh sách → trả `-2`, không chèn trùng (so sánh có giới hạn theo `cmdsize`, không
+  `strncmp` mù).
+- File không phải Mach-O arm64 thuần → `not a thin arm64 Mach-O`.
+
+Entitlements của game và CMS **được đọc từ chính file đang sửa**, không phải từ plist rời — nên không có
+chuyện patch một bản game khác mà lại ký bằng entitlements của bản này. `main.m` truyền `ent = NULL` và
+`macho.c` tự bóc slot `5` + slot `0x10000` ra trước khi ghi đè.
+
+### 6.5 Chưa xác minh trên máy thật
+
+1. **CoreTrust/TrollStore có nhận bản đã ký lại không.** Đây là rủi ro chính, và là lý do có nút
+   **Restore original**.
+2. `platform-application` + `com.apple.private.security.no-sandbox` trong `patcher\entitlements.plist` là
+   điều kiện để app ghi được vào bundle của app khác. Trên TrollStore thì hai entitlement này thường được
+   cho qua; chưa thử.
+3. Chưa biết `anogs` (ACE) phản ứng gì với một app có thêm `LC_LOAD_DYLIB` và CodeDirectory mới.
+4. Kích thước TIPA: 58 785 byte. Giải nén: `DeltaSkin.dylib` 137 744 + `DeltaSkinPatcher` 89 136 +
+   `Info.plist` 1 520.
+
+Nếu Patch xong game không mở: mở lại app DeltaSkin → **Restore original** → game về nguyên trạng (file thực
+thi + `Info.plist` + xoá dylib khỏi `Frameworks/`). Bản backup nằm trong `Documents` của app DeltaSkin nên
+gỡ app đó là mất luôn đường lùi — restore trước, xoá sau.
+
+---
+
+## 7. Chưa xác minh (phải nói rõ)
+
+Danh sách dưới đây là cho **dylib** (menu + skin). Danh sách cho **app patcher** nằm riêng ở 6.5 — cả hai
+đều cùng một lý do: không có máy iOS trong phiên này.
 
 1. **Chưa chạy trên thiết bị thật.** Không có máy iOS trong phiên này; mọi kết luận runtime là suy ra từ
    pseudocode + cấu trúc dữ liệu, chưa phải quan sát.
@@ -384,7 +538,7 @@ tiêu thụ ở `fabTapped`) — bản gốc `PxMenuView` dùng đúng cách nà
 
 ---
 
-## 7. Build & phát hành
+## 8. Build & phát hành
 
 - Repo: https://github.com/LuongLeTanTuan/DeltaSkin (public).
 - Máy này không có Xcode; **macOS runner của GitHub Actions bị account này từ chối** (run bị cancel ngay,
@@ -394,21 +548,36 @@ tiêu thụ ở `fabTapped`) — bản gốc `PxMenuView` dùng đúng cách nà
 - Lỗi lần đầu đã gặp và đã sửa (ghi lại để khỏi mất công): `mach_vm.h` không tồn tại trên SDK di động →
   dùng `vm_region_recurse_64`; `_dyld_get_image_header` trả `mach_header*` → phải ép kiểu; file nguồn
   phải thuần ASCII (ký tự `—` làm clang báo `unexpected character U+FFFD`).
-- Tải bản build: tab **Actions** → run mới nhất → artifact `DeltaSkin-dylib`.
-  Run đã kiểm tra: https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41232210097
-  (`DeltaSkin.dylib`, 120 456 byte, arm64; quét byte: 0 hit cho `AnoSDK`, `SetSkin`, `ModularWeapon`,
-  `jailbroken`, `DeltaForceClient`, `GNames/GObjects`, `UObject` **và** 0 hit cho tên súng/skin
-  như `M4A1`, `Assault Rifle`, `Submachine`, `Sniper Rifle`).
-- Kích thước tăng từ 87 KB → 120 KB vì có bảng 85 súng / 705 skin nhúng (blob XOR 18,9 KB).
+- Tải bản build: tab **Actions** → run mới nhất → một run ra **hai** artifact:
+
+  | Artifact | Nội dung | Dùng cho |
+  |---|---|---|
+  | `DeltaSkin-tipa` | `DeltaSkin.tipa` 58 785 byte = `DeltaSkin.app` (`DeltaSkin.dylib` + `DeltaSkinPatcher` + `Info.plist`) | TrollStore, iOS 14 |
+  | `DeltaSkin-dylib` | `DeltaSkin.dylib` 137 744 byte, arm64 | chèn vào IPA bằng eSign/Sideloadly |
+
+- Run đã kiểm tra: https://github.com/LuongLeTanTuan/DeltaSkin/actions/runs/41261986446
+  (`DeltaSkin.dylib` nguyên bản: 0 hit cho `AnoSDK`, `SetSkin`, `ModularWeapon`, `jailbroken`,
+  `DeltaForceClient`, `GNames/GObjects`, `UObject` **và** 0 hit cho tên súng/skin như `M4A1`,
+  `Assault Rifle`, `Submachine`, `Sniper Rifle`).
+- Kích thước 87 KB → 137 KB vì có bảng **78 súng / 707 skin** nhúng (blob XOR 18 620 byte) cộng phần UI
+  hai cột (hai `UITableView` + Auto Layout dựng lại mỗi lần mở).
+- Job `patcher` trong cùng workflow **chạy thật** chứ không chỉ biên dịch: nó build một Mach-O arm64 giả
+  (`tools\dummy_main.c`, link với `-headerpad 0x800`), chạy `patcher_cli inject` trên đó, rồi
+  `tools\verify_sig.py` băm lại từng page. Đây là thứ đã bắt được lỗi `page 0 mismatch` ở 6.2 — nếu chỉ
+  biên dịch thì lỗi đó đi thẳng ra máy người dùng.
 
 ---
 
-## 8. Bước tiếp theo nếu có thiết bị
+## 9. Bước tiếp theo nếu có thiết bị
 
-1. Build dylib (Actions), chèn vào IPA bằng eSign, cài.
-2. Mở game, bấm nút "DS" → xem dòng trạng thái. Nếu `GNames not found` / `GObjects not found` thì bản build
-   game đã đổi layout → gửi log (Xcode/Console: `[DeltaSkin]`) để chỉnh magic/scan.
-3. Nhập skin id → APPLY. Nếu trả `no target matched (code -4)` nghĩa là tên setter không khớp → cần dump
-   thêm danh sách UFunction của 3 lớp đó (script IDA đã có trong `D:\dfgpt\work\dump_ida.py`).
-4. Nếu crash khi APPLY: con trỏ native dò sai offset (0xE8 thường đúng với UE5.3+). Thử bật cờ
+1. **iOS 14 + TrollStore:** cài `DeltaSkin.tipa` → mở app → xác nhận nó tìm ra game → **Patch** → mở game.
+   Nếu game không mở được: mở lại app → **Restore original**. Đây là phép thử cho toàn bộ mục 6.
+2. **iOS 18 no-JB:** tải `DeltaSkin.dylib`, chèn vào IPA bằng eSign, cài.
+3. Mở game, bấm nút **DS** → xem dòng `runtime`. Nếu `GNames not found` / `GObjects not found` thì bản
+   build game đã đổi layout → gửi log (Xcode/Console: `[DeltaSkin]`) để chỉnh magic/scan.
+4. Chọn súng ở cột trái → chọn skin ở cột phải → **Apply Skin**. Nếu trả `Nothing applied (code -4)` nghĩa
+   là tên setter không khớp → cần dump thêm danh sách UFunction của 3 lớp đó (script IDA đã có trong
+   `D:\dfgpt\work\dump_ida.py`). Nếu apply ra **sai skin** thì lỗi nằm ở bảng `SkinTable.h`, không ở UI —
+   đối chiếu cặp (khẩu, skin) với `PxExtFFi` ở mục 3.
+5. Nếu crash khi APPLY: con trỏ native dò sai offset (0xE8 thường đúng với UE5.3+). Thử bật cờ
    "safe mode" (chưa viết) hoặc gửi crash log.
