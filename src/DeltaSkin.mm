@@ -90,7 +90,7 @@ DSSTR(kJailbreakMessage, 0x2B,
       0x4E, 0x48, 0x5E, 0x59, 0x42, 0x5F, 0x52, 0x0B, 0x59, 0x42, 0x58, 0x40)
 
 // -------------------------------------------------------- weapon / skin table
-// Lifted from PxExtFFi (the vendor menu's own UI framework), 81 weapon groups
+// Lifted from PxExtFFi (the vendor menu's own UI framework), 78 weapon groups
 // and 707 (weapon, skinId, name) rows. PxMenu.dylib's table was used before and
 // it was wrong: its "weapon" list carried skin entries as if they were weapons
 // ("ASh-12 Battle Rifle-Goose Goose Duck", "KC17 Assault Rifle-SAW"), so 22 of
@@ -585,30 +585,35 @@ static void ds_bootstrap(void) {
 }
 
 // ------------------------------------------------------------------- the UI
-// Flow cloned from the working no-jailbreak build (D:\delta\PxExtNoJB,
-// PxMenuView.m / PxStore.m): a floating button, a menu that lives in its own
-// UIWindow and is torn down on close, and action-sheet combos for
-// weapon -> skin. Two properties of that design matter more than the looks:
+// Floating button plus a menu in its own UIWindow, as in the working no-jailbreak
+// build (D:\delta\PxExtNoJB, PxMenuView.m). Three properties matter more than
+// the looks:
 //
 //   1. the button is a 52x52 view added to the game window. It is never a
-//      full-screen transparent container -- that is exactly what made the
-//      previous revision swallow every touch after the panel was hidden:
-//      a clear view with userInteractionEnabled = YES still wins hit-testing
-//      over everything underneath, hidden subviews notwithstanding.
-//   2. the menu window is hidden, detached from its scene and released on
-//      close. A hidden-but-still-attached window stays in the window list,
-//      takes key status back, and the game stops receiving touches.
+//      full-screen transparent container -- that is exactly what made an earlier
+//      revision swallow every touch after the panel was hidden: a clear view
+//      with userInteractionEnabled = YES still wins hit-testing over everything
+//      underneath, hidden subviews notwithstanding.
+//   2. the menu window is hidden, detached from its scene and released on close.
+//      A hidden-but-still-attached window stays in the window list, takes key
+//      status back, and the game stops receiving touches.
+//   3. the picker is two side-by-side lists (weapon -> that weapon's skins),
+//      laid out by Auto Layout against the live window bounds. The earlier
+//      build used two action-sheet combos over fixed frames computed once from
+//      UIScreen.bounds, which is why the panel sat in the wrong place in
+//      landscape and why the id in the text field could disagree with the cell
+//      that was just tapped.
 
 static void ds_toast(NSString *message);
 
-@interface DSMenu : NSObject
+@interface DSMenu : NSObject <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UIButton *fab;
 @property (nonatomic, strong) UIWindow *window;
 @property (nonatomic, strong) UIView *panel;
 @property (nonatomic, strong) UILabel *status;
-@property (nonatomic, strong) UIButton *weaponCombo;
-@property (nonatomic, strong) UIButton *skinCombo;
-@property (nonatomic, strong) UITextField *field;
+@property (nonatomic, strong) UILabel *idLabel;
+@property (nonatomic, strong) UITableView *weaponTable;
+@property (nonatomic, strong) UITableView *skinTable;
 @property (nonatomic, assign) NSInteger weaponIdx;
 @property (nonatomic, assign) NSInteger skinIdx;
 @property (nonatomic, assign) BOOL dragging;
@@ -634,6 +639,16 @@ static UIWindow *ds_host_window(void) {
         if (!best || w.windowLevel < best.windowLevel) best = w;
     }
     return best;
+}
+
+// The game runs in landscape, and UIScreen.mainScreen.bounds can still describe
+// the device in its physical (portrait) orientation when a window is created
+// outside the scene's rotation callback. A panel laid out from that is half off
+// screen and every cell sits somewhere other than where the finger lands.
+static CGRect ds_screen_bounds(void) {
+    UIWindow *host = ds_host_window();
+    if (host && host.bounds.size.width > 1 && host.bounds.size.height > 1) return host.bounds;
+    return UIScreen.mainScreen.bounds;
 }
 
 // ------------------------------------------------------------ floating button
@@ -711,7 +726,7 @@ static BOOL gFabInstalled = NO;
 - (void)show {
     if (self.window) return;
 
-    UIWindow *w = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    UIWindow *w = [[UIWindow alloc] initWithFrame:ds_screen_bounds()];
     w.windowLevel = UIWindowLevelAlert + 60;
     w.backgroundColor = UIColor.clearColor;
     w.rootViewController = [UIViewController new];
@@ -725,19 +740,38 @@ static BOOL gFabInstalled = NO;
     }
     self.window = w;
 
-    [self buildPanel];
-
     UIView *root = w.rootViewController.view;
+    // From the window, not root.bounds: the root view has not been sized yet at
+    // this point, and a zero there collapses every constraint below.
+    const CGFloat rw = w.bounds.size.width, rh = w.bounds.size.height;
+    const CGFloat W = rw > 48.0 ? MIN(rw - 24.0, 720.0) : rw;
+    const CGFloat H = rh > 48.0 ? MIN(rh - 24.0, 620.0) : rh;
     UIView *dim = [[UIView alloc] initWithFrame:root.bounds];
     dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
     dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [dim addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self
                                                                      action:@selector(hide)]];
     [root addSubview:dim];
+
+    // Rebuilt on every open, against the live window bounds. The panel used to be
+    // built once and cached, so a stale size from the first open (or from before
+    // the game finished rotating to landscape) put every cell where the finger
+    // was not.
+    self.panel = nil;
+    [self buildPanel];
     [root addSubview:self.panel];
 
+    [NSLayoutConstraint activateConstraints:@[
+        [self.panel.centerXAnchor constraintEqualToAnchor:root.centerXAnchor],
+        [self.panel.centerYAnchor constraintEqualToAnchor:root.centerYAnchor],
+        [self.panel.widthAnchor constraintEqualToConstant:W],
+        [self.panel.heightAnchor constraintEqualToConstant:H],
+        [self.panel.widthAnchor constraintLessThanOrEqualToAnchor:root.widthAnchor constant:-16.0],
+        [self.panel.heightAnchor constraintLessThanOrEqualToAnchor:root.heightAnchor constant:-16.0],
+    ]];
+
     w.hidden = NO;
-    [w makeKeyWindow];     // the ID field needs a key window to raise the keyboard
+    [w makeKeyWindow];     // the tables need a key window for their first layout
     [self refresh];
 }
 
@@ -746,7 +780,6 @@ static BOOL gFabInstalled = NO;
     self.window = nil;
     if (!w) return;
 
-    [self.field resignFirstResponder];
     [self.panel removeFromSuperview];     // keep the panel, drop the window
 
     w.rootViewController.view.userInteractionEnabled = NO;
@@ -787,22 +820,28 @@ static UIButton *ds_row_button(NSString *title, id target, SEL action) {
     return b;
 }
 
-- (UILabel *)sectionLabel:(NSString *)text y:(CGFloat)y width:(CGFloat)w {
-    UILabel *l = ds_label(text, 10, [UIColor colorWithWhite:1 alpha:0.35]);
-    l.frame = CGRectMake(16, y, w - 32, 14);
-    return l;
+- (UITableView *)tableWithPlaceholder:(NSString *)placeholder {
+    UITableView *t = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    t.translatesAutoresizingMaskIntoConstraints = NO;
+    t.backgroundColor = [UIColor colorWithWhite:1 alpha:0.04];
+    t.layer.cornerRadius = 10;
+    t.layer.masksToBounds = YES;
+    t.separatorStyle = UITableViewCellSeparatorStyleNone;
+    t.rowHeight = UITableViewAutomaticDimension;
+    t.estimatedRowHeight = 42;
+    t.dataSource = self;
+    t.delegate = self;
+    t.tintColor = [UIColor colorWithRed:0.20 green:0.80 blue:0.50 alpha:1];
+    [t registerClass:[UITableViewCell class] forCellReuseIdentifier:@"dsrow"];
+    (void)placeholder;
+    return t;
 }
 
 - (void)buildPanel {
     if (self.panel) return;
 
-    CGRect screen = UIScreen.mainScreen.bounds;
-    CGFloat w = MIN(screen.size.width - 32.0, 380.0);
-    CGFloat h = 340.0;
-
-    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake((screen.size.width - w) / 2.0,
-                                                             (screen.size.height - h) / 2.0,
-                                                             w, h)];
+    UIView *panel = [UIView new];
+    panel.translatesAutoresizingMaskIntoConstraints = NO;
     panel.backgroundColor = [UIColor colorWithRed:0.055 green:0.058 blue:0.070 alpha:0.98];
     panel.layer.cornerRadius = 16;
     panel.layer.borderWidth = 1;
@@ -810,179 +849,168 @@ static UIButton *ds_row_button(NSString *title, id target, SEL action) {
     self.panel = panel;
 
     UILabel *title = ds_label(@"SKIN MOD", 15, [UIColor colorWithWhite:0.95 alpha:1]);
-    title.frame = CGRectMake(16, 12, w - 72, 20);
+    title.translatesAutoresizingMaskIntoConstraints = NO;
     [panel addSubview:title];
 
-    self.status = ds_label(gStatus, 10, [UIColor colorWithWhite:0.45 alpha:1]);
-    self.status.frame = CGRectMake(16, 30, w - 72, 14);
-    self.status.lineBreakMode = NSLineBreakByTruncatingTail;
-    [panel addSubview:self.status];
-
     UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(w - 46, 6, 40, 40);
+    close.translatesAutoresizingMaskIntoConstraints = NO;
     [close setTitle:@"\u2715" forState:UIControlStateNormal];
     [close setTitleColor:[UIColor colorWithWhite:0.55 alpha:1] forState:UIControlStateNormal];
     [close.titleLabel setFont:[UIFont systemFontOfSize:17]];
     [close addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:close];
 
-    [panel addSubview:[self sectionLabel:@"CATALOG PICKER" y:56 width:w]];
+    self.status = ds_label(gStatus, 10, [UIColor colorWithWhite:0.42 alpha:1]);
+    self.status.translatesAutoresizingMaskIntoConstraints = NO;
+    self.status.lineBreakMode = NSLineBreakByTruncatingTail;
+    [panel addSubview:self.status];
 
-    UILabel *wl = ds_label(@"Weapon", 12, [UIColor colorWithWhite:0.82 alpha:1]);
-    wl.frame = CGRectMake(16, 78, 100, 18);
-    [panel addSubview:wl];
-
-    self.weaponCombo = ds_row_button(@"-", self, @selector(weaponTapped));
-    self.weaponCombo.frame = CGRectMake(w - 176, 72, 160, 32);
-    [panel addSubview:self.weaponCombo];
-
-    UILabel *sl = ds_label(@"Skin", 12, [UIColor colorWithWhite:0.82 alpha:1]);
-    sl.frame = CGRectMake(16, 118, 100, 18);
-    [panel addSubview:sl];
-
-    self.skinCombo = ds_row_button(@"-", self, @selector(skinTapped));
-    self.skinCombo.frame = CGRectMake(w - 176, 112, 160, 32);
-    [panel addSubview:self.skinCombo];
-
-    UILabel *cl = ds_label(@"Custom ID", 12, [UIColor colorWithWhite:0.82 alpha:1]);
-    cl.frame = CGRectMake(16, 158, 100, 18);
-    [panel addSubview:cl];
-
-    self.field = [[UITextField alloc] initWithFrame:CGRectMake(w - 176, 152, 160, 32)];
-    self.field.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
-    self.field.layer.cornerRadius = 8;
-    self.field.textColor = [UIColor colorWithWhite:0.92 alpha:1];
-    self.field.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
-    self.field.textAlignment = NSTextAlignmentCenter;
-    self.field.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
-    self.field.returnKeyType = UIReturnKeyDone;
-    self.field.autocorrectionType = UITextAutocorrectionTypeNo;
-    self.field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    self.field.attributedPlaceholder =
-        [[NSAttributedString alloc] initWithString:@"0x8588D162"
-                                        attributes:@{NSForegroundColorAttributeName:
-                                                         [UIColor colorWithWhite:1 alpha:0.22]}];
-    [panel addSubview:self.field];
-
-    [panel addSubview:[self sectionLabel:@"ACTIONS" y:196 width:w]];
+    // Two panes, like the vendor menu: every weapon on the left, and only that
+    // weapon's skins on the right. The previous build used two action-sheet
+    // combos, which hid the mapping -- you could not see which weapon a skin
+    // belonged to, and nothing on screen proved the grouping was right.
+    self.weaponTable = [self tableWithPlaceholder:@"Weapon"];
+    self.skinTable = [self tableWithPlaceholder:@"Skin"];
+    [panel addSubview:self.weaponTable];
+    [panel addSubview:self.skinTable];
 
     UIButton *apply = ds_row_button(@"Apply Skin", self, @selector(applyTapped));
-    apply.frame = CGRectMake(16, 218, w - 32, 38);
+    apply.translatesAutoresizingMaskIntoConstraints = NO;
     apply.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
     apply.backgroundColor = [UIColor colorWithRed:0.20 green:0.80 blue:0.50 alpha:0.95];
     [apply setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
     apply.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
     [panel addSubview:apply];
 
-    UIButton *restore = ds_row_button(@"Restore Default (0)", self, @selector(restoreTapped));
-    restore.frame = CGRectMake(16, 262, w - 32, 36);
+    UIButton *restore = ds_row_button(@"Default", self, @selector(restoreTapped));
+    restore.translatesAutoresizingMaskIntoConstraints = NO;
     restore.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
     [panel addSubview:restore];
 
-    UIButton *runtime = ds_row_button(@"Runtime Status", self, @selector(statusTapped));
-    runtime.frame = CGRectMake(16, 304, w - 32, 30);
-    runtime.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    self.idLabel = ds_label(@"0x00000000", 11, [UIColor colorWithWhite:0.55 alpha:1]);
+    self.idLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.idLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightMedium];
+    [panel addSubview:self.idLabel];
+
+    UIButton *runtime = [UIButton buttonWithType:UIButtonTypeSystem];
+    runtime.translatesAutoresizingMaskIntoConstraints = NO;
+    [runtime setTitle:@"runtime" forState:UIControlStateNormal];
+    [runtime.titleLabel setFont:[UIFont systemFontOfSize:10]];
+    [runtime setTitleColor:[UIColor colorWithWhite:0.40 alpha:1] forState:UIControlStateNormal];
+    [runtime addTarget:self action:@selector(statusTapped) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:runtime];
+
+    // The ID is read-only: the old build let a stale typed value win over the
+    // picked cell, so choosing a different skin in the list applied the previous
+    // one. There is no way to pick a skin and get a different id now.
+    [NSLayoutConstraint activateConstraints:@[
+        [title.topAnchor constraintEqualToAnchor:panel.topAnchor constant:12.0],
+        [title.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:16.0],
+
+        [close.topAnchor constraintEqualToAnchor:panel.topAnchor constant:4.0],
+        [close.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-8.0],
+        [close.widthAnchor constraintEqualToConstant:40.0],
+        [close.heightAnchor constraintEqualToConstant:40.0],
+
+        [self.status.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:2.0],
+        [self.status.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:16.0],
+        [self.status.trailingAnchor constraintEqualToAnchor:close.leadingAnchor constant:-4.0],
+
+        [self.weaponTable.topAnchor constraintEqualToAnchor:self.status.bottomAnchor constant:10.0],
+        [self.weaponTable.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:16.0],
+        [self.weaponTable.bottomAnchor constraintEqualToAnchor:apply.topAnchor constant:-10.0],
+        [self.weaponTable.widthAnchor constraintEqualToAnchor:panel.widthAnchor multiplier:0.40],
+
+        [self.skinTable.topAnchor constraintEqualToAnchor:self.weaponTable.topAnchor],
+        [self.skinTable.leadingAnchor constraintEqualToAnchor:self.weaponTable.trailingAnchor constant:8.0],
+        [self.skinTable.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-16.0],
+        [self.skinTable.bottomAnchor constraintEqualToAnchor:self.weaponTable.bottomAnchor],
+
+        [apply.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-16.0],
+        [apply.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor constant:-12.0],
+        [apply.heightAnchor constraintEqualToConstant:38.0],
+        [apply.widthAnchor constraintEqualToConstant:136.0],
+
+        [restore.trailingAnchor constraintEqualToAnchor:apply.leadingAnchor constant:-8.0],
+        [restore.centerYAnchor constraintEqualToAnchor:apply.centerYAnchor],
+        [restore.heightAnchor constraintEqualToConstant:38.0],
+        [restore.widthAnchor constraintEqualToConstant:96.0],
+
+        [runtime.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:16.0],
+        [runtime.centerYAnchor constraintEqualToAnchor:apply.centerYAnchor],
+
+        [self.idLabel.leadingAnchor constraintEqualToAnchor:runtime.trailingAnchor constant:8.0],
+        [self.idLabel.centerYAnchor constraintEqualToAnchor:apply.centerYAnchor],
+        [self.idLabel.trailingAnchor constraintLessThanOrEqualToAnchor:restore.leadingAnchor constant:-8.0],
+    ]];
 }
 
 // ------------------------------------------------------------------ selection
 - (void)refresh {
     if (!self.panel) return;
 
-    [self.weaponCombo setTitle:[NSString stringWithFormat:@"%@ \u25BE",
-                                ds_weapon_name((NSUInteger)self.weaponIdx)]
-                      forState:UIControlStateNormal];
-
-    NSUInteger n = ds_skin_count((NSUInteger)self.weaponIdx);
-    NSString *sn = n ? ds_skin_name((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx)
-                     : @"Default / None";
-    [self.skinCombo setTitle:[NSString stringWithFormat:@"%@ \u25BE", sn]
-                    forState:UIControlStateNormal];
-    self.skinCombo.enabled = (n > 0);
+    if (self.weaponIdx < 0 || self.weaponIdx >= (NSInteger)ds_weapon_count()) self.weaponIdx = 0;
+    NSInteger n = (NSInteger)ds_skin_count((NSUInteger)self.weaponIdx);
+    if (self.skinIdx < 0 || self.skinIdx >= n) self.skinIdx = 0;
 
     self.status.text = gStatus;
-    if (self.field.text.length == 0) [self syncFieldFromSelection];
+    self.idLabel.text = [NSString stringWithFormat:@"0x%08X",
+                         ds_skin_id((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx)];
+
+    [self.weaponTable reloadData];
+    [self.skinTable reloadData];
 }
 
-- (void)presentOptions:(NSArray<NSString *> *)options
-                 title:(NSString *)title
-               handler:(void (^)(NSInteger))handler {
-    UIViewController *host = self.window.rootViewController;
-    if (!host || options.count == 0) return;
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
+    if (tv == self.weaponTable) return (NSInteger)ds_weapon_count();
+    return (NSInteger)ds_skin_count((NSUInteger)self.weaponIdx);
+}
 
-    UIAlertController *sheet =
-        [UIAlertController alertControllerWithTitle:title
-                                            message:nil
-                                     preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSInteger i = 0; i < (NSInteger)options.count; i++) {
-        [sheet addAction:[UIAlertAction actionWithTitle:options[i]
-                                                  style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) { handler(i); }]];
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"dsrow"];
+    c.backgroundColor = UIColor.clearColor;
+
+    UIView *bg = [UIView new];
+    bg.backgroundColor = [UIColor colorWithRed:0.20 green:0.80 blue:0.50 alpha:0.20];
+    c.selectedBackgroundView = bg;
+
+    c.textLabel.numberOfLines = 2;
+    c.textLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+
+    if (tv == self.weaponTable) {
+        BOOL picked = (ip.row == self.weaponIdx);
+        c.textLabel.text = ds_weapon_name((NSUInteger)ip.row);
+        c.textLabel.textColor = picked ? [UIColor colorWithRed:0.40 green:0.95 blue:0.65 alpha:1]
+                                       : [UIColor colorWithWhite:0.82 alpha:1];
+        c.textLabel.font = [UIFont systemFontOfSize:12 weight:picked ? UIFontWeightSemibold
+                                                                    : UIFontWeightRegular];
+    } else {
+        c.textLabel.text = ds_skin_name((NSUInteger)self.weaponIdx, (NSUInteger)ip.row);
+        c.textLabel.textColor = [UIColor colorWithWhite:0.90 alpha:1];
+        c.textLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
-                                              style:UIAlertActionStyleCancel
-                                            handler:nil]];
-    // An action sheet without a source view traps on iPad.
-    if (sheet.popoverPresentationController) {
-        sheet.popoverPresentationController.sourceView = self.panel;
-        sheet.popoverPresentationController.sourceRect = self.panel.bounds;
+    return c;
+}
+
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [tv deselectRowAtIndexPath:ip animated:NO];
+
+    if (tv == self.weaponTable) {
+        if (ip.row == self.weaponIdx) return;
+        self.weaponIdx = ip.row;
+        self.skinIdx = 0;
+        [self.skinTable setContentOffset:CGPointZero animated:NO];
+    } else {
+        self.skinIdx = ip.row;
     }
-    [host presentViewController:sheet animated:YES completion:nil];
-}
-
-- (void)weaponTapped {
-    NSUInteger count = ds_weapon_count();
-    NSMutableArray<NSString *> *options = [NSMutableArray arrayWithCapacity:count];
-    for (NSUInteger i = 0; i < count; i++) [options addObject:ds_weapon_name(i)];
-
-    __weak typeof(self) weakSelf = self;
-    [self presentOptions:options title:@"Weapon" handler:^(NSInteger idx) {
-        DSMenu *me = weakSelf;
-        if (!me) return;
-        me.weaponIdx = idx;
-        me.skinIdx = 0;
-        me.field.text = @"";
-        [me refresh];
-    }];
-}
-
-- (void)skinTapped {
-    NSUInteger count = ds_skin_count((NSUInteger)self.weaponIdx);
-    if (!count) return;
-
-    NSMutableArray<NSString *> *options = [NSMutableArray arrayWithCapacity:count];
-    for (NSUInteger i = 0; i < count; i++) {
-        [options addObject:ds_skin_name((NSUInteger)self.weaponIdx, i)];
-    }
-
-    __weak typeof(self) weakSelf = self;
-    [self presentOptions:options title:@"Skin" handler:^(NSInteger idx) {
-        DSMenu *me = weakSelf;
-        if (!me) return;
-        me.skinIdx = idx;
-        [me refresh];
-    }];
-}
-
-- (void)syncFieldFromSelection {
-    uint32_t sid = ds_skin_id((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx);
-    if (sid) self.field.text = [NSString stringWithFormat:@"0x%08X", sid];
+    [self refresh];
 }
 
 // -------------------------------------------------------------------- actions
 - (void)applyTapped {
-    [self.field resignFirstResponder];
-
-    NSString *raw = [self.field.text stringByTrimmingCharactersInSet:
-                     NSCharacterSet.whitespaceCharacterSet];
-    int32_t skinId = 0;
-    if (raw.length) {
-        skinId = (int32_t)strtoul(raw.UTF8String, NULL, 0);
-    } else {
-        skinId = (int32_t)ds_skin_id((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx);
-    }
-    if (skinId == 0) {
-        ds_toast(@"Select a skin or enter a valid ID first.");
+    uint32_t sid = ds_skin_id((NSUInteger)self.weaponIdx, (NSUInteger)self.skinIdx);
+    if (sid == 0) {
+        ds_toast(@"Pick a weapon, then a skin.");
         return;
     }
 
@@ -990,9 +1018,9 @@ static UIButton *ds_row_button(NSString *title, id target, SEL action) {
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         if (!gReady) ds_bootstrap();
         if (!gReady) { [self setStatusText:gStatus]; return; }
-        int n = ds_apply_all(skinId);
+        int n = ds_apply_all((int)sid);
         NSString *msg = n > 0
-            ? [NSString stringWithFormat:@"Skin 0x%X applied to %d object(s).", skinId, n]
+            ? [NSString stringWithFormat:@"Skin 0x%X applied to %d object(s).", sid, n]
             : [NSString stringWithFormat:@"Nothing applied (code %d). Hold the gun in a match.", n];
         [self setStatusText:msg];
         ds_toast(msg);
@@ -1000,8 +1028,6 @@ static UIButton *ds_row_button(NSString *title, id target, SEL action) {
 }
 
 - (void)restoreTapped {
-    [self.field resignFirstResponder];
-    self.field.text = @"0";
     [self setStatusText:@"restoring..."];
     dispatch_async(dispatch_get_global_queue(0, 0), ^{
         if (!gReady) ds_bootstrap();
@@ -1015,7 +1041,7 @@ static UIButton *ds_row_button(NSString *title, id target, SEL action) {
 }
 
 - (void)statusTapped {
-    ds_toast([NSString stringWithFormat:@"%@\n%lu weapons / ace %d/7",
+    ds_toast([NSString stringWithFormat:@"%@\n%lu weapons / 707 skins / ace %d/7",
               gStatus, (unsigned long)ds_weapon_count(), gAceHits]);
 }
 
