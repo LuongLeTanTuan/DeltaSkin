@@ -5,6 +5,10 @@ không hook vào anti-cheat.
 
 > Đọc `REPORT.md` để biết nó được dịch ngược từ đâu và cái gì **chưa** được kiểm chứng trên máy thật.
 
+> **Có cách khác không chèn code:** [`dbpatch/`](dbpatch/) — sửa thẳng file dữ liệu SQLite mà
+> game tự đọc (`DataTable.bytes`), không dylib, không hook, không đụng tiến trình game. Đang là
+> hướng chính; phần dylib bên dưới giữ lại làm tham khảo.
+
 **Tải về**
 
 | File | Cho |
