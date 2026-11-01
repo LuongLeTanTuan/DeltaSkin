@@ -161,7 +161,7 @@ Ba hàm dùng bảng này:
 Bản clone đầu tiên nhúng nguyên bảng này vào `src/SkinTable.h` dưới dạng blob XOR `0x5A` (85 tên súng +
 705 dòng). Bảng đó đã bị thay — lý do ở 3.9.
 
-### 3.9 Phải lấy lại bảng từ `PxExtFFi` (78 súng / 707 skin) — vì sao bảng cũ lệch
+### 3.9 Phải lấy lại bảng từ `PxExtFFi` (64 súng / 705 skin) — vì sao bảng cũ lệch
 
 Bảng ở 3.8 đọc **đúng** nhưng **chia nhóm sai**, và đó chính là triệu chứng "danh sách skin bị lệch,
 bấm ô này ra ô khác".
@@ -177,22 +177,74 @@ nhóm gốc, nên danh sách vừa thiếu vừa lệch — lỗi dữ liệu, k
 
 | Địa chỉ | Nội dung |
 |---|---|
-| `0x1CF05A8` | mảng con trỏ dòng |
-| `0x1CF46A0` | 707 dòng cùng cấu trúc |
+| `0x1CF05A8` | dòng weapon skin, 690 bản ghi |
+| `0x1CF46A0` | dòng melee / cosmetic, 18 bản ghi |
 
-Vì mỗi chuỗi đã chứa cả hai nửa, việc chia nhóm suy ra từ chính chuỗi của nhà bán, không phải đoán theo
-`weaponId`. Kiểm tra lại trên blob đã nhúng (`tools\check_groups.py`):
+Mỗi dòng là 16 byte `{ u32 id; u32 kind=6; u32 nameFileOff; u32 nameTag=0x00300000 }`. Khoảng cách giữa
+hai dòng **không cố định** (16 ở catalog đầu, 24 ở catalog thứ hai), nên chỉ đọc được bằng cách quét cặp
+`(kind, nameTag)` rồi giải mã con trỏ tên.
 
-- 78 nhóm, 707 dòng, **707 id khác nhau**
-- 0 nhóm rỗng
-- 0 cặp tên súng mà tên này là tiền tố của tên kia (bẫy khi tách theo dấu `-`)
-- 0 id trùng giữa hai khẩu
-- decode tiêu tốn đúng **18 620/18 620 byte** — không thiếu, không thừa, nên không dòng nào bị bỏ âm thầm
+**Lỗi thật của bảng cũ.** Bảng 78/707 trước đây sinh ra bằng cách quét 4 byte thô trên toàn file. Cách đó
+khớp thêm **3 bản ghi ma** nằm ngoài chuỗi thật, cả ba cùng trỏ vào một offset tên chết `0x1CC46B1`:
 
-Định dạng blob trong `src/SkinTable.h`: 78 tên súng length-prefixed, rồi 707 dòng
+| Offset bản ghi | id ma | Chỗ nó bị gán nhầm trong bảng cũ |
+|---|---|---|
+| `0x1CF2528` | `0x86231595` | `SV-98 Sniper Rifle` → "Khéo Léo" |
+| `0x1CF2B28` | `0x862C3D54` | `Cung Phức Hợp` → "Một Lòng Tĩnh Lặng" |
+| `0x1CF3248` | `0x86BBAC15` | `SAW` |
+
+Ba id đó **không tồn tại** trong catalog của nhà bán. Chọn đúng dòng đó thì game nhận một appearance id
+không có thật và rơi về skin mặc định (hoặc skin của khẩu khác) — đúng kiểu "id tùm lùm".
+
+Bảng mới do `tools\build_table.py` sinh tất định từ `PxExtFFi`:
+
+- Bỏ mọi bản ghi có con trỏ tên không giải được → còn **705 bản ghi** (khớp tuyệt đối với 705 dòng của
+  `PxMenu.dylib` đọc độc lập ở `0x1C680`).
+- Chia nhóm theo chính chuỗi `"Súng - Skin"` của nhà bán. 8 chuỗi dán liền dấu gạch (`KC17 Assault
+  Rifle-SAW`) được tách lại vào đúng khẩu cha bằng cách so tiền tố với danh sách súng đã biết.
+- 18 mục melee / cosmetic không có tiền tố súng gom vào một nhóm `Cận chiến & Khác` thay vì hiện thành
+  18 khẩu súng giả.
+
+Kết quả: **64 nhóm, 705 dòng, 705 id khác nhau**. `tools\verify_table.py` dựng lại đúng `ds_load_table()`
+trên header và đối chiếu từng id với catalog nhà bán:
+
+```
+consumed 18352/18352 blob bytes
+64 weapon groups / 705 skin rows / 705 unique ids
+vendor catalog: 705 ids (3 ghost records dropped)
+table ids == vendor ids: True
+```
+
+Định dạng blob trong `src/SkinTable.h`: 64 tên súng length-prefixed, rồi 705 dòng
 `{ u8 weaponIndex, u32 skinId, u8 nameLen, name }`, XOR `0x5A` (rồi XOR thêm `gMaskSalt`). `ds_load_table()`
 chỉ đọc — nó **không** suy luận nhóm lúc chạy, nên không còn đường nào để UI lệch khỏi bảng: cặp
 (`weaponIdx`, `skinIdx`) là nguồn duy nhất, và `ds_skin_id()` tra trong đúng nhóm đó.
+
+> Nhóm `Cận chiến & Khác` là dữ liệu thật của nhà bán nhưng menu này **chỉ gọi setter trên
+> `ModularWeaponDesc`**, nên id melee áp vào súng sẽ không ra đúng skin. Menu gốc có nhánh riêng cho
+> melee ("Switch to melee weapon to apply", `0x1CCF7BD`).
+
+### 3.10 Tên setter: bảng cũ có hai tên không tồn tại
+
+`ds_setter_rank()` xếp hạng theo tên UFunction. Bảng tên cũ lấy từ chuỗi trong `PxMenu.dylib`, nhưng
+kiểm lại trên binary game thì:
+
+| Tên | Có trong `DeltaForceClient`? |
+|---|---|
+| `SetSkinId` | **không** — 0 lần |
+| `SetSkinApperanceId` | có |
+| `SetSkinInfo` | có (11 lần) |
+| `SetSkin` | có |
+| `SetSkin_BS` / `SetSkin_ES` | có |
+| `ApplySkin` | có (17 lần) |
+
+`SetSkinId` nằm ở hạng cao nhất nên mỗi lần phân giải đều quét hết bảng object rồi không khớp gì; còn
+`SetSkinInfo` thì chưa bao giờ được thử. Thứ hạng mới: `SetSkinApperanceId` (nhận thẳng một `int` id, đúng
+cái được ghi vào param block) → `SetSkinInfo` → `SetSkin` → `ApplySkin` → `SetSkin_BS`/`SetSkin_ES`.
+
+Vẫn còn một khoảng cách chưa vá: menu gốc leo thang bốn bước — descriptor → `…DataComponentAppearance` →
+`…FuncComponentAppearance` → "all components"; bản clone **chỉ** gọi descriptor. Đó là lý do có khẩu skin
+không hiện. Chưa sửa vì chưa có máy để thử.
 
 ---
 
@@ -310,7 +362,7 @@ Cấu trúc:
 ```
 DeltaSkinMod\
   src\DeltaSkin.mm          toàn bộ logic (discovery + skin + UI + antiban), ObjC++ một file
-  src\SkinTable.h           bảng 78 súng / 707 skin, XOR 0x5A, 18620 byte
+  src\SkinTable.h           bảng 64 súng / 705 skin, XOR 0x5A, 18 352 byte
   patcher\macho.c           đọc/sửa/ký lại Mach-O (struct riêng, không phụ thuộc SDK)
   patcher\sha256.c          SHA-256 tự viết (CI chạy được trên Linux lẫn iOS)
   patcher\main.m            app DeltaSkin: tìm game, backup, Patch, Restore
@@ -562,7 +614,7 @@ Danh sách dưới đây là cho **dylib** (menu + skin). Danh sách cho **app p
   (`DeltaSkin.dylib` nguyên bản: 0 hit cho `AnoSDK`, `SetSkin`, `ModularWeapon`, `jailbroken`,
   `DeltaForceClient`, `GNames/GObjects`, `UObject` **và** 0 hit cho tên súng/skin như `M4A1`,
   `Assault Rifle`, `Submachine`, `Sniper Rifle`).
-- Kích thước 87 KB → 137 KB vì có bảng **78 súng / 707 skin** nhúng (blob XOR 18 620 byte) cộng phần UI
+- Kích thước 87 KB → 137 KB vì có bảng **64 súng / 705 skin** nhúng (blob XOR 18 352 byte) cộng phần UI
   hai cột (hai `UITableView` + Auto Layout dựng lại mỗi lần mở).
 - Job `patcher` trong cùng workflow **chạy thật** chứ không chỉ biên dịch: nó build một Mach-O arm64 giả
   (`tools\dummy_main.c`, link với `-headerpad 0x800`), chạy `patcher_cli inject` trên đó, rồi

@@ -117,11 +117,11 @@ chuyện "chọn ô này ra id khác".
 |---|---|
 | **DS** (nút tròn) | mở/đóng panel. Kéo được bằng ngón tay, kéo xong không mở menu (phân biệt tap với pan) |
 | cột **trái** | 78 khẩu súng. Bấm một khẩu = chọn khẩu đó, cột phải nhảy về skin đầu tiên của nó |
-| cột **phải** | skin của khẩu đang chọn (tổng 707 skin). Bấm một dòng = chọn skin đó |
+| cột **phải** | skin của khẩu đang chọn (tổng 705 skin). Bấm một dòng = chọn skin đó |
 | dòng `0x…` cạnh nút Apply | ID của skin đang chọn — chỉ đọc, luôn khớp với dòng vừa bấm |
 | **Apply Skin** | gọi setter skin cho mọi object súng tìm thấy |
 | **Default** | áp skin id `0` (về mặc định) |
-| **runtime** | hiện `ready · 78 weapons / 707 skins / ace N/7` = bảng skin đã nạp + số hàm gửi report của ACE đã bị vô hiệu |
+| **runtime** | hiện `ready · 64 weapons / 705 skins / ace N/7` = bảng skin đã nạp + số hàm gửi report của ACE đã bị vô hiệu |
 | dòng trạng thái | dưới tiêu đề, cập nhật kết quả từng lần Apply (`Skin 0x… applied to N object(s)` / `Nothing applied (code -4)`) |
 
 Chạm ra vùng tối bên ngoài panel hoặc nút **✕** để đóng. Đóng xong menu **huỷ luôn window của nó**
@@ -133,14 +133,25 @@ Panel được **dựng lại mỗi lần mở** và canh theo `window.bounds` �
 `UIScreen.mainScreen.bounds` đo một lần lúc khởi động — đó là lý do bản trước panel nằm lệch và ô bấm
 không trúng khi game đang ở landscape.
 
-Danh sách súng và skin **lấy từ `PxExtFFi`** (framework UI của chính menu bên bán): 707 dòng
+Danh sách súng và skin **lấy từ `PxExtFFi`** (framework UI của chính menu bên bán): 705 dòng
 `(weapon, skinId, tên hiển thị đầy đủ "Súng - Skin")` tại `0x1CF05A8` + `0x1CF46A0`. Vì mỗi dòng đã
 mang sẵn id và tên đầy đủ, việc chia nhóm suy ra từ chính chuỗi của nhà bán chứ không đoán. Kiểm tra:
-78 nhóm, 0 nhóm rỗng, 0 cặp tên súng lồng nhau, 0 id trùng giữa hai khẩu.
+64 nhóm, 705 dòng, 705 id khác nhau, 0 nhóm rỗng, 0 id trùng.
+
+Bảng sinh lại bằng script, không sửa tay:
+
+```
+python tools\build_table.py     # sinh lại src/SkinTable.h từ PxExtFFi
+python tools\verify_table.py    # dựng lại ds_load_table() và đối chiếu từng id
+```
 
 > Bản trước lấy bảng từ `PxMenu.dylib` (705 dòng chia theo 85 "khẩu"). 22 trong 85 tên đó thật ra là
 > **một skin** bị đẩy lên làm tên súng (`ASh-12 Battle Rifle-Goose Goose Duck`…), nên chọn súng xong
-> danh sách skin bên phải lệch hẳn. Xem `REPORT.md` mục 3.9.
+> danh sách skin bên phải lệch hẳn. Thêm vào đó cách quét 4 byte cũ nhặt được **3 bản ghi ma** có id
+> không tồn tại trong catalog — chọn đúng 3 dòng đó thì ra skin của khẩu khác. Xem `REPORT.md` mục 3.9.
+
+> Nhóm cuối **Cận chiến & Khác** là 18 id melee/cosmetic của nhà bán. Chúng là dữ liệu thật nhưng menu
+> này chỉ gọi setter trên descriptor của súng, nên áp id melee vào súng sẽ không ra đúng skin.
 
 Mã lỗi trong trạng thái:
 - `-1/-2` object/class không hợp lệ

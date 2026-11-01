@@ -1,4 +1,4 @@
-consumed 18917/18917
-match=True
-row0=(0, 2240246495, 'Quang Phổ Tốc Kích')
-w84='Tái Sinh'
+consumed 18352/18352 blob bytes
+64 weapon groups / 705 skin rows / 705 unique ids
+vendor catalog: 705 ids (3 ghost records dropped)
+table ids == vendor ids: True
